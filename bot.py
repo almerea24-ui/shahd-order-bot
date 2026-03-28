@@ -258,10 +258,25 @@ def resolve_product_name(name):
     for alias, real_name in PRODUCT_ALIASES.items():
         if alias.lower() == name_lower:
             return real_name
-    # Try partial match (alias is contained in name or name is contained in alias)
+    # Try word-based matching: score by how many words match
+    name_words = set(name_clean.split())
+    best_match = None
+    best_score = 0
     for alias, real_name in PRODUCT_ALIASES.items():
-        if alias in name_clean or name_clean in alias:
-            return real_name
+        alias_words = set(alias.split())
+        common = name_words & alias_words
+        # Require at least 2 common words, or all words of the shorter one match
+        if len(common) >= 2 or (len(common) >= 1 and (common == name_words or common == alias_words) and len(common) > 0 and len(name_words) <= 2 and len(alias_words) <= 2):
+            # Score: common words / total unique words (Jaccard similarity)
+            score = len(common) / len(name_words | alias_words)
+            # Bonus for exact subset match
+            if name_words.issubset(alias_words) or alias_words.issubset(name_words):
+                score += 0.5
+            if score > best_score:
+                best_score = score
+                best_match = real_name
+    if best_match and best_score >= 0.4:
+        return best_match
     return name_clean
 
 
@@ -302,12 +317,14 @@ def find_city(rpc, city_name, state_id):
 def find_product(rpc, product_name):
     """Find product in Odoo by name, using aliases first."""
     resolved_name = resolve_product_name(product_name)
+    logger.info(f"Product lookup: '{product_name}' -> resolved: '{resolved_name}'")
 
     # Try exact match with resolved name
     exact = rpc.search_read('product.product', [
         ['name', '=', resolved_name], ['sale_ok', '=', True], ['active', '=', True]
     ], fields=['id', 'name', 'list_price'], limit=1)
     if exact:
+        logger.info(f"Exact match found: '{exact[0]['name']}'")
         return exact[0]
 
     # Try ilike with resolved name
@@ -322,32 +339,62 @@ def find_product(rpc, product_name):
                 return 10000
             search_words = set(search.lower().split())
             pname_words = set(pname.lower().split())
+            # All search words found in product name
             if search_words.issubset(pname_words):
                 return 5000 - len(pname)
+            # Search string contained in product name
             if search.lower() in pname.lower():
                 return 3000 - len(pname)
+            # Word overlap - require significant overlap
             common = len(search_words & pname_words)
-            return common * 100 - len(pname)
+            total = len(search_words | pname_words)
+            if total > 0 and common / total >= 0.4:
+                return common * 100 - len(pname)
+            return -10000  # Poor match, penalize heavily
         products.sort(key=score, reverse=True)
-        return products[0]
+        best = products[0]
+        best_score = score(best)
+        if best_score > -10000:
+            logger.info(f"ilike match found: '{best['name']}' (score: {best_score})")
+            return best
 
     # Try original name if different from resolved
     if resolved_name != product_name:
         products = rpc.search_read('product.product', [
             ['name', 'ilike', product_name], ['sale_ok', '=', True], ['active', '=', True]
-        ], fields=['id', 'name', 'list_price'], limit=5)
+        ], fields=['id', 'name', 'list_price'], limit=10)
         if products:
-            return products[0]
+            def score2(p):
+                pname = p['name'].strip()
+                search = product_name.strip()
+                search_words = set(search.lower().split())
+                pname_words = set(pname.lower().split())
+                if search_words.issubset(pname_words):
+                    return 5000 - len(pname)
+                common = len(search_words & pname_words)
+                total = len(search_words | pname_words)
+                if total > 0 and common / total >= 0.4:
+                    return common * 100 - len(pname)
+                return -10000
+            products.sort(key=score2, reverse=True)
+            best = products[0]
+            if score2(best) > -10000:
+                logger.info(f"Original name match: '{best['name']}'")
+                return best
 
-    # Try keyword search
+    # Try multi-keyword search - require ALL important keywords to match
     keywords = [kw for kw in resolved_name.split() if len(kw) > 2]
-    for kw in keywords:
-        products = rpc.search_read('product.product', [
-            ['name', 'ilike', kw], ['sale_ok', '=', True], ['active', '=', True]
-        ], fields=['id', 'name', 'list_price'], limit=5)
+    if len(keywords) >= 2:
+        # Build domain with all keywords
+        domain = [['sale_ok', '=', True], ['active', '=', True]]
+        for kw in keywords:
+            domain.append(['name', 'ilike', kw])
+        products = rpc.search_read('product.product', domain, fields=['id', 'name', 'list_price'], limit=5)
         if products:
+            logger.info(f"Multi-keyword match: '{products[0]['name']}'")
             return products[0]
 
+    logger.warning(f"No product found for: '{product_name}' (resolved: '{resolved_name}')")
     return None
 
 
