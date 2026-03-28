@@ -662,10 +662,28 @@ def create_full_order(order_data, brand):
             })
             delivery_fee = 0
 
-    # Read final total
+    # Read final total and force-adjust if needed
     order_info = rpc.read('sale.order', order_id, fields=['amount_total', 'name'])[0]
     current_total = order_info['amount_total']
     order_name = order_info['name']
+
+    # Force-adjust: if target_total is set and current_total doesn't match, fix it
+    if target_total > 0 and abs(current_total - target_total) > 1:
+        diff = target_total - current_total
+        logger.info(f"Price adjustment needed: current={current_total}, target={target_total}, diff={diff}")
+        if product_lines:
+            # Adjust first product line price to make total match
+            first_line_data = rpc.read('sale.order.line', product_lines[0], fields=['price_unit', 'product_uom_qty'])[0]
+            old_price = first_line_data['price_unit']
+            qty = first_line_data['product_uom_qty'] or 1
+            # diff is spread across qty
+            new_price = old_price + (diff / qty)
+            rpc.write('sale.order.line', product_lines[0], {'price_unit': new_price})
+            logger.info(f"Adjusted first product line price: {old_price} -> {new_price}")
+            # Re-read total
+            order_info = rpc.read('sale.order', order_id, fields=['amount_total', 'name'])[0]
+            current_total = order_info['amount_total']
+            logger.info(f"New total after adjustment: {current_total}")
 
     # 6. Confirm order
     rpc.call('sale.order', 'action_confirm', [[order_id]])
