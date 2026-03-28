@@ -280,37 +280,97 @@ def resolve_product_name(name):
     return name_clean
 
 
+def _normalize_al(name):
+    """Generate variants with/without Arabic 'ال' prefix for each word."""
+    if not name:
+        return []
+    variants = set()
+    variants.add(name)
+    # Try removing 'ال' from beginning
+    if name.startswith('ال'):
+        variants.add(name[2:])
+    else:
+        variants.add('ال' + name)
+    # Try for each word
+    words = name.split()
+    new_words = []
+    for w in words:
+        if w.startswith('ال'):
+            new_words.append(w[2:])
+        else:
+            new_words.append('ال' + w)
+    variants.add(' '.join(new_words))
+    # Also try: ة -> ه and ه -> ة
+    for v in list(variants):
+        variants.add(v.replace('ة', 'ه'))
+        variants.add(v.replace('ه', 'ة'))
+    return list(variants)
+
+
 def find_city(rpc, city_name, state_id):
     """Find city in x_city model by name and state."""
     if not city_name or not state_id:
         return None
-    # Exact match
-    cities = rpc.search_read('x_city', [
-        ['x_name', '=', city_name], ['x_studio_state', '=', state_id], ['x_active', '=', True]
-    ], fields=['id', 'x_name'])
-    if cities:
-        return cities[0]
-    # Fuzzy match
-    cities = rpc.search_read('x_city', [
-        ['x_name', 'ilike', city_name], ['x_studio_state', '=', state_id], ['x_active', '=', True]
-    ], fields=['id', 'x_name'], limit=20)
-    if cities:
+    
+    # Generate all name variants (with/without ال, ة/ه)
+    name_variants = _normalize_al(city_name)
+    logger.info(f"City lookup: '{city_name}' -> variants: {name_variants}")
+    
+    # Try exact match with all variants
+    for variant in name_variants:
+        cities = rpc.search_read('x_city', [
+            ['x_name', '=', variant], ['x_studio_state', '=', state_id], ['x_active', '=', True]
+        ], fields=['id', 'x_name'])
+        if cities:
+            logger.info(f"City exact match: '{cities[0]['x_name']}'")
+            return cities[0]
+    
+    # Try ilike match with all variants
+    all_candidates = []
+    for variant in name_variants:
+        cities = rpc.search_read('x_city', [
+            ['x_name', 'ilike', variant], ['x_studio_state', '=', state_id], ['x_active', '=', True]
+        ], fields=['id', 'x_name'], limit=20)
+        all_candidates.extend(cities)
+    
+    # Remove duplicates
+    seen_ids = set()
+    unique_candidates = []
+    for c in all_candidates:
+        if c['id'] not in seen_ids:
+            seen_ids.add(c['id'])
+            unique_candidates.append(c)
+    
+    if unique_candidates:
         best = None
         best_score = -1
-        for c in cities:
+        for c in unique_candidates:
             cname = c['x_name']
-            if cname == city_name:
-                return c
+            # Check exact match with any variant
+            for variant in name_variants:
+                if cname == variant:
+                    logger.info(f"City variant match: '{cname}'")
+                    return c
             score = 0
-            if city_name in cname or cname in city_name:
-                score = 100
+            # Check containment with original and variants
+            for variant in name_variants:
+                if variant in cname or cname in variant:
+                    score = max(score, 100)
             words1 = set(city_name.split())
             words2 = set(cname.split())
-            score += len(words1 & words2) * 50
+            # Also compare without ال
+            words1_no_al = set(w[2:] if w.startswith('ال') else w for w in words1)
+            words2_no_al = set(w[2:] if w.startswith('ال') else w for w in words2)
+            common = len(words1_no_al & words2_no_al)
+            score += common * 50
             if score > best_score:
                 best_score = score
                 best = c
+        if best:
+            logger.info(f"City fuzzy match: '{best['x_name']}' (score: {best_score})")
         return best
+    
+    logger.warning(f"No city found for: '{city_name}'")
     return None
 
 
