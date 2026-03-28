@@ -11,7 +11,7 @@ import json
 import logging
 import asyncio
 import requests
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, CallbackQueryHandler,
     ContextTypes, filters
@@ -504,14 +504,18 @@ def create_full_order(order_data, brand):
 
 # ============ Telegram Bot Handlers ============
 
+BRAND_KEYBOARD = ReplyKeyboardMarkup(
+    [[KeyboardButton("🟣 شهد بيوتي"), KeyboardButton("🔵 مارلين")]],
+    resize_keyboard=True,
+    is_persistent=True
+)
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "مرحباً! أنا بوت إدخال الطلبات لأودو.\n\n"
-        "الأوامر:\n"
-        "/shahd - طلبات شهد بيوتي\n"
-        "/marlin - طلبات مارلين\n"
-        "/help - المساعدة\n\n"
-        "اختر البراند أولاً ثم أرسل الطلبات."
+        "اختر المتجر من الأزرار بالأسفل، ثم أرسل الطلبات.\n"
+        "تقدر تغير المتجر بأي وقت بالضغط على الزر الثاني.",
+        reply_markup=BRAND_KEYBOARD
     )
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -526,17 +530,27 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def set_shahd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['brand'] = 'shahd'
-    await update.message.reply_text("تم تحديد البراند: شهد بيوتي\nأرسل الطلبات...")
+    await update.message.reply_text("✅ تم تحديد البراند: شهد بيوتي\nأرسل الطلبات...", reply_markup=BRAND_KEYBOARD)
 
 async def set_marlin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['brand'] = 'marlin'
-    await update.message.reply_text("تم تحديد البراند: مارلين\nأرسل الطلبات...")
+    await update.message.reply_text("✅ تم تحديد البراند: مارلين\nأرسل الطلبات...", reply_markup=BRAND_KEYBOARD)
 
 
 async def handle_order_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle incoming order text - supports multiple concurrent orders."""
     message_text = update.message.text
     if message_text.startswith('/'):
+        return
+
+    # Handle brand selection buttons
+    if message_text == "🟣 شهد بيوتي":
+        context.user_data['brand'] = 'shahd'
+        await update.message.reply_text("✅ تم تحديد البراند: شهد بيوتي\nأرسل الطلبات...", reply_markup=BRAND_KEYBOARD)
+        return
+    elif message_text == "🔵 مارلين":
+        context.user_data['brand'] = 'marlin'
+        await update.message.reply_text("✅ تم تحديد البراند: مارلين\nأرسل الطلبات...", reply_markup=BRAND_KEYBOARD)
         return
 
     msg = await update.message.reply_text("جاري تحليل الطلب...")
