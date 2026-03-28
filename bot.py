@@ -454,6 +454,86 @@ def find_product(rpc, product_name):
             logger.info(f"Multi-keyword match: '{products[0]['name']}'")
             return products[0]
 
+    # Try with Arabic normalization variants (ال, ة/ه)
+    name_variants = _normalize_al(resolved_name)
+    for variant in name_variants:
+        if variant == resolved_name:
+            continue
+        products = rpc.search_read('product.product', [
+            ['name', 'ilike', variant], ['sale_ok', '=', True], ['active', '=', True]
+        ], fields=['id', 'name', 'list_price'], limit=10)
+        if products:
+            logger.info(f"Arabic variant match: '{products[0]['name']}' (variant: '{variant}')")
+            return products[0]
+
+    # Try single keyword search - search by each word individually and score results
+    keywords = [kw for kw in resolved_name.split() if len(kw) > 1]
+    # Also add variants without ال and with ة/ه swap
+    expanded_keywords = set()
+    for kw in keywords:
+        expanded_keywords.add(kw)
+        if kw.startswith('ال'):
+            expanded_keywords.add(kw[2:])
+        else:
+            expanded_keywords.add('ال' + kw)
+        expanded_keywords.add(kw.replace('ة', 'ه'))
+        expanded_keywords.add(kw.replace('ه', 'ة'))
+        # Handle common Arabic spelling variations
+        expanded_keywords.add(kw.replace('ي', 'ى'))
+        expanded_keywords.add(kw.replace('ى', 'ي'))
+    
+    all_single_results = []
+    seen_ids = set()
+    for kw in expanded_keywords:
+        if len(kw) < 2:
+            continue
+        products = rpc.search_read('product.product', [
+            ['name', 'ilike', kw], ['sale_ok', '=', True], ['active', '=', True]
+        ], fields=['id', 'name', 'list_price'], limit=10)
+        for p in products:
+            if p['id'] not in seen_ids:
+                seen_ids.add(p['id'])
+                all_single_results.append(p)
+    
+    if all_single_results:
+        # Score each result by how many of the original keywords appear in its name
+        def fuzzy_score(p):
+            pname = p['name'].lower()
+            pname_normalized = pname.replace('ة', 'ه').replace('ى', 'ي')
+            # Remove ال from product name words for comparison
+            pname_words = set()
+            for w in pname.split():
+                pname_words.add(w)
+                if w.startswith('ال'):
+                    pname_words.add(w[2:])
+            pname_words_normalized = set(w.replace('ة', 'ه').replace('ى', 'ي') for w in pname_words)
+            
+            score = 0
+            for kw in keywords:
+                kw_lower = kw.lower()
+                kw_normalized = kw_lower.replace('ة', 'ه').replace('ى', 'ي')
+                kw_no_al = kw_lower[2:] if kw_lower.startswith('ال') else kw_lower
+                kw_no_al_normalized = kw_normalized[2:] if kw_normalized.startswith('ال') else kw_normalized
+                
+                # Check if keyword (or its variant) appears in product name
+                if kw_lower in pname or kw_no_al in pname:
+                    score += 100
+                elif kw_normalized in pname_normalized or kw_no_al_normalized in pname_normalized:
+                    score += 90
+                # Check partial match (keyword is start of a word in product name)
+                elif any(w.startswith(kw_no_al[:3]) for w in pname_words if len(kw_no_al) >= 3):
+                    score += 50
+                elif any(w.startswith(kw_no_al_normalized[:3]) for w in pname_words_normalized if len(kw_no_al_normalized) >= 3):
+                    score += 40
+            return score
+        
+        all_single_results.sort(key=fuzzy_score, reverse=True)
+        best = all_single_results[0]
+        best_sc = fuzzy_score(best)
+        if best_sc >= 50:  # At least one reasonable keyword match
+            logger.info(f"Fuzzy single-keyword match: '{best['name']}' (score: {best_sc})")
+            return best
+
     logger.warning(f"No product found for: '{product_name}' (resolved: '{resolved_name}')")
     return None
 
