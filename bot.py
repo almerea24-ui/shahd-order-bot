@@ -1,49 +1,186 @@
 #!/usr/bin/env python3
 """
 Telegram Bot for entering WhatsApp orders into Odoo.
-Standalone deployment version.
+Supports multiple concurrent orders, notes, correct product matching,
+and mandatory province/city validation.
 """
 
 import os
+import sys
 import json
 import logging
+import asyncio
 import requests
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, CallbackQueryHandler,
     ContextTypes, filters
 )
+
 from parse_order import parse_with_llm
 
-# --- Configuration from environment variables ---
-BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
+# --- Configuration ---
+BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8773451402:AAGD3-4QY1HKK3RZ8ze4cyXw1a3H96Keqsw")
 ODOO_URL = os.environ.get("ODOO_URL", "https://shahdbeauty.odoo.com")
 ODOO_DB = os.environ.get("ODOO_DB", "1tarabut-shahdbeauty-main-26480069")
 ODOO_USER = os.environ.get("ODOO_USER", "admin")
 ODOO_PASSWORD = os.environ.get("ODOO_PASSWORD", "2002")
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
-OPENAI_BASE_URL = os.environ.get("OPENAI_BASE_URL", "")
 
 IRAQ_COUNTRY_ID = 106
 WHATSAPP_TAG_ID = 4
 
 PROVINCE_MAP = {
-    "الأنبار": 1762, "الانبار": 1762, "الرمادي": 1762,
+    "الأنبار": 1762, "الانبار": 1762, "الرمادي": 1762, "انبار": 1762,
     "أربيل": 1782, "اربيل": 1782,
-    "البصرة": 1764, "البصره": 1764,
-    "بابل": 1772, "بغداد": 1774, "دهوك": 1776,
-    "ديالى": 1780, "ديالي": 1780, "ذي قار": 1778,
-    "كربلاء": 1784, "كربلا": 1784, "كركوك": 1786,
-    "ميسان": 1788, "المثنى": 1766, "المثني": 1766,
-    "النجف": 1794, "نينوى": 1790, "نينوي": 1790,
-    "القادسية": 1768, "القادسيه": 1768, "الديوانية": 1768,
-    "صلاح الدين": 1796, "السليمانية": 1770, "السليمانيه": 1770,
-    "واسط": 1792,
+    "البصرة": 1764, "البصره": 1764, "بصرة": 1764, "بصره": 1764,
+    "بابل": 1772, "الحلة": 1772, "حلة": 1772, "الحله": 1772,
+    "بغداد": 1774,
+    "دهوك": 1776,
+    "ديالى": 1780, "ديالي": 1780, "بعقوبة": 1780, "بعقوبه": 1780,
+    "ذي قار": 1778, "الناصرية": 1778, "الناصريه": 1778,
+    "كربلاء": 1784, "كربلا": 1784,
+    "كركوك": 1786,
+    "ميسان": 1788, "العمارة": 1788, "العماره": 1788,
+    "المثنى": 1766, "المثني": 1766, "السماوة": 1766, "السماوه": 1766,
+    "النجف": 1794, "نجف": 1794,
+    "نينوى": 1790, "نينوي": 1790, "الموصل": 1790,
+    "القادسية": 1768, "القادسيه": 1768, "الديوانية": 1768, "الديوانيه": 1768,
+    "صلاح الدين": 1796, "تكريت": 1796,
+    "السليمانية": 1770, "السليمانيه": 1770,
+    "واسط": 1792, "الكوت": 1792,
 }
 
 CARRIER_MAP = {
     "shahd": {"carrier_id": 8, "name": "Albarq Delivery Shahd", "product_id": 51},
     "marlin": {"carrier_id": 11, "name": "Albarq Delivery Marlin", "product_id": 51},
+}
+
+# Product name mapping: common abbreviations -> exact Odoo product names
+PRODUCT_ALIASES = {
+    "بكج جوز الهند": "بكج جوز الهند للعناية بالشعر",
+    "صابونة كركم": "صابونة الكركم",
+    "ص كركم": "صابونة الكركم",
+    "صابونة كركم مني": "صابونة الكركم مني",
+    "ص كركم ميني": "صابونة الكركم مني",
+    "غسول عروسة": "غسول العروسة للوجه والجسم",
+    "غسول العروسة": "غسول العروسة للوجه والجسم",
+    "غسول العروسه": "غسول العروسة للوجه والجسم",
+    "كريم تبيض": "كريم  تبيض العروسة للوجه و الجسم",
+    "كريم تبيض العروسة": "كريم  تبيض العروسة للوجه و الجسم",
+    "كريم تبيض العروسه": "كريم  تبيض العروسة للوجه و الجسم",
+    "مبيض العروسة": "كريم  تبيض العروسة للوجه و الجسم",
+    "مبيض العروسه": "كريم  تبيض العروسة للوجه و الجسم",
+    "مبيضة العروسة": "كريم  تبيض العروسة للوجه و الجسم",
+    "مبيضه العروسه": "كريم  تبيض العروسة للوجه و الجسم",
+    "مقشر عروسة": "مقشر العروسة للوجه والجسم",
+    "مقشر العروسة": "مقشر العروسة للوجه والجسم",
+    "مقشر العروسه": "مقشر العروسة للوجه والجسم",
+    "لوشن عروسة": "لوشن العروسة",
+    "لوشن العروسه": "لوشن العروسة",
+    "مرطب العروسة": "لوشن العروسة",
+    "مرطب العروسه": "لوشن العروسة",
+    "مورد العروسة": "مورد العروسة لتوريد  الوجه والجسم",
+    "مورد العروسه": "مورد العروسة لتوريد  الوجه والجسم",
+    "بكج عروسة": "بكج العروسة",
+    "بكج العروسه": "بكج العروسة",
+    "بكج كافيار": "بكج الكافيار",
+    "بكج نيلة": "بكج النيلة الثلاثي",
+    "بكج النيلة": "بكج النيلة الثلاثي",
+    "بكج النيله": "بكج النيلة الثلاثي",
+    "بكج انوثة": "كورس الأنوثة للعناية بالجسم",
+    "بكج أنوثة": "كورس الأنوثة للعناية بالجسم",
+    "بكج الانوثة": "كورس الأنوثة للعناية بالجسم",
+    "بكج الانوثه": "كورس الأنوثة للعناية بالجسم",
+    "بكج الكرسمس": "بكج الكرسمس الحصري – الإصدار المحدود (4 منتجات + 2 هدايا وتوصيل مجاني )",
+    "بكج كرسمس": "بكج الكرسمس الحصري – الإصدار المحدود (4 منتجات + 2 هدايا وتوصيل مجاني )",
+    "بكج الكريسمس": "بكج الكرسمس الحصري – الإصدار المحدود (4 منتجات + 2 هدايا وتوصيل مجاني )",
+    "كورس بياض": "كورس بياض الثلج للوجه",
+    "كورس بياض وجه": "كورس بياض الثلج للوجه",
+    "كورس بياض الثلج": "كورس بياض الثلج للوجه",
+    "بياض الثلج": "بياض الثلج وجه كريم",
+    "بكج تشيز": "بكج التشيز كيك للعناية الفاخرة بالجسم",
+    "بكج التشيز كيك": "بكج التشيز كيك للعناية الفاخرة بالجسم",
+    "بكج تشيز كيك": "بكج التشيز كيك للعناية الفاخرة بالجسم",
+    "بكج حساسة": "بكج العناية بالمناطق الحساسة",
+    "بكج مناطق حساسة": "بكج العناية بالمناطق الحساسة",
+    "كورس انوثة": "كورس الأنوثة للعناية بالجسم",
+    "كورس الانوثة": "كورس الأنوثة للعناية بالجسم",
+    "كورس الانوثه": "كورس الأنوثة للعناية بالجسم",
+    "كورس معالجة": "كورس معالجة البشرة",
+    "عسل الانوثه": "عسل مسمن مناطق انثوية",
+    "عسل الانوثة": "عسل مسمن مناطق انثوية",
+    "عسل انوثة": "عسل مسمن مناطق انثوية",
+    "عسل انوثه": "عسل مسمن مناطق انثوية",
+    "عسل العام": "عسل مسمن عام",
+    "عسل عام": "عسل مسمن عام",
+    "عسل وجه": "عسل مسمن وجه",
+    "عسل الوجه": "عسل مسمن وجه",
+    "عسل رجالي": "عسل رجالي",
+    "كريم الانوثة": "كريم  الأنةثه للعناية بالمناطق الحساسة",
+    "كريم الانوثه": "كريم  الأنةثه للعناية بالمناطق الحساسة",
+    "كريم انوثة": "كريم  الأنةثه للعناية بالمناطق الحساسة",
+    "كريم انوثه": "كريم  الأنةثه للعناية بالمناطق الحساسة",
+    "كريم معالجة": "كريم معالجة البشرة",
+    "كريم معالجه": "كريم معالجة البشرة",
+    "كريم التشققات": "كريم التشققات",
+    "كريم تشققات": "كريم التشققات",
+    "واقي شمس": "واقي شمس شهد بيوتي",
+    "حمرة": "حمرة  كولدن روز",
+    "حمره": "حمرة  كولدن روز",
+    "اضافر": "اضافر هديه",
+    "ليفة سلكونية": "ليفة سلكونية",
+    "ليفه سلكونيه": "ليفة سلكونية",
+    "ليفة مغربية": "ليفة مغربية",
+    "ليفه مغربيه": "ليفة مغربية",
+    "مخمرية": "مخمرية",
+    "مكس الزيوت": "مكس الزيوت",
+    "مكس زيوت": "مكس الزيوت",
+    "شاي الماجا": "شاي الماجا",
+    "شاي ماجا": "شاي الماجا",
+    "سيروم فيتامين": "سيروم فياتمين c",
+    "سيروم فيتامين سي": "سيروم فياتمين c",
+    "مقشر كاندي": "مقشر كاندي",
+    "تنت": "تنت الخدود والشفايف",
+    "تنت سائل": "تنت سائل",
+    "زيت التطويل": "زيت التطويل",
+    "زيت الكثافة": "زيت الكثافة",
+    "زيت الكثافه": "زيت الكثافة",
+    "زيت الكافيار": "زيت الكافيار",
+    "زيت ايقاف التساقط": "زيت ايقاف التساقط",
+    "زيت جوز الهند": "زيت جوز الهند للشعر",
+    "شامبو الكافيار": "شامبو الكافيار",
+    "شامبو جوز الهند": "شامبو جوز الهند للشعر",
+    "سيروم جوز الهند": "سيروم جوز الهند للشعر",
+    "ماسك جوز الهند": "ماسك جوز الهند للشعر",
+    "سيروم الشعر": "سيروم الشعر بخلاصة الكافيار",
+    "سيروم الاضافر": "سيروم الأضافر",
+    "سيروم الرموش": "سيروم الرومش",
+    "ماسك الكافيار": "ماسك الكافيار",
+    "مربى شكولا": "مربى الشكولا",
+    "مربى فروتي": "مربى الفروتي",
+    "مربى فريز": "مربى الفريز",
+    "مربى كرز": "مربى الكرز",
+    "مربى كرميل": "مربى الكرميل",
+    "مربى موز": "مربى الموز",
+    "مرطب التشيز كيك": "مرطب التشيز كيك للجسم",
+    "غسول التشيز كيك": "غسول التشيز كيك",
+    "مقشر التشيز كيك": "مقشر التشيز كيك",
+    "بكج النيلة المغربية": "مجموعة العناية بالجسم من النيلة المغربية",
+    "مجموعة النيلة": "مجموعة العناية بالجسم من النيلة المغربية",
+    "غسول النيلة": "غسول النيلة",
+    "غسول النيله": "غسول النيلة",
+    "لوشن النيلة": "لوشن النيلة",
+    "لوشن النيله": "لوشن النيلة",
+    "مقشر النيلة": "مقشر النيلة",
+    "مقشر النيله": "مقشر النيلة",
+    "سبلاش النيلة": "سبلاش النيلة",
+    "قناع النيلة": "قناع النيلة الطيني",
+    "كريم تبيض الانوثة": "كريم تبيض بكج الأنوثة",
+    "كريم تبيض الانوثه": "كريم تبيض بكج الأنوثة",
+    "مورد الانوثة": "مورد الأنوثة",
+    "مورد الانوثه": "مورد الأنوثة",
+    "حنة": "حنة هدية",
+    "حنه": "حنة هدية",
 }
 
 logging.basicConfig(
@@ -83,10 +220,9 @@ class OdooRPC:
         return data.get('result', {})
 
     def call(self, model, method, args=None, kwargs=None):
-        args = args or []
-        kwargs = kwargs or {}
         return self._jsonrpc('/web/dataset/call_kw', {
-            'model': model, 'method': method, 'args': args, 'kwargs': kwargs
+            'model': model, 'method': method,
+            'args': args or [], 'kwargs': kwargs or {}
         })
 
     def search_read(self, model, domain, fields=None, limit=None):
@@ -111,70 +247,107 @@ class OdooRPC:
 
 # ============ Odoo Order Functions ============
 
+def resolve_product_name(name):
+    """Resolve product name using aliases, return exact Odoo name."""
+    name_clean = name.strip()
+    # Try exact match in aliases
+    if name_clean in PRODUCT_ALIASES:
+        return PRODUCT_ALIASES[name_clean]
+    # Try lowercase match
+    name_lower = name_clean.lower()
+    for alias, real_name in PRODUCT_ALIASES.items():
+        if alias.lower() == name_lower:
+            return real_name
+    # Try partial match (alias is contained in name or name is contained in alias)
+    for alias, real_name in PRODUCT_ALIASES.items():
+        if alias in name_clean or name_clean in alias:
+            return real_name
+    return name_clean
+
+
 def find_city(rpc, city_name, state_id):
+    """Find city in x_city model by name and state."""
     if not city_name or not state_id:
         return None
+    # Exact match
     cities = rpc.search_read('x_city', [
         ['x_name', '=', city_name], ['x_studio_state', '=', state_id], ['x_active', '=', True]
     ], fields=['id', 'x_name'])
     if cities:
         return cities[0]
+    # Fuzzy match
     cities = rpc.search_read('x_city', [
         ['x_name', 'ilike', city_name], ['x_studio_state', '=', state_id], ['x_active', '=', True]
-    ], fields=['id', 'x_name'], limit=10)
+    ], fields=['id', 'x_name'], limit=20)
     if cities:
-        best, best_score = None, -1
+        best = None
+        best_score = -1
         for c in cities:
             cname = c['x_name']
             if cname == city_name:
                 return c
-            score = 100 if (city_name in cname or cname in city_name) else 0
-            score += len(set(city_name.split()) & set(cname.split())) * 50
+            score = 0
+            if city_name in cname or cname in city_name:
+                score = 100
+            words1 = set(city_name.split())
+            words2 = set(cname.split())
+            score += len(words1 & words2) * 50
             if score > best_score:
-                best_score, best = score, c
+                best_score = score
+                best = c
         return best
     return None
 
 
 def find_product(rpc, product_name):
+    """Find product in Odoo by name, using aliases first."""
+    resolved_name = resolve_product_name(product_name)
+
+    # Try exact match with resolved name
     exact = rpc.search_read('product.product', [
-        ['name', '=', product_name], ['sale_ok', '=', True]
+        ['name', '=', resolved_name], ['sale_ok', '=', True], ['active', '=', True]
     ], fields=['id', 'name', 'list_price'], limit=1)
     if exact:
         return exact[0]
+
+    # Try ilike with resolved name
     products = rpc.search_read('product.product', [
-        ['name', 'ilike', product_name], ['sale_ok', '=', True]
+        ['name', 'ilike', resolved_name], ['sale_ok', '=', True], ['active', '=', True]
     ], fields=['id', 'name', 'list_price'], limit=10)
     if products:
         def score(p):
-            pname = p['name'].lower().strip()
-            search = product_name.lower().strip()
-            search_words = set(search.split())
-            pname_words = set(pname.split())
+            pname = p['name'].strip()
+            search = resolved_name.strip()
             if pname == search:
                 return 10000
+            search_words = set(search.lower().split())
+            pname_words = set(pname.lower().split())
             if search_words.issubset(pname_words):
                 return 5000 - len(pname)
-            if search in pname:
+            if search.lower() in pname.lower():
                 return 3000 - len(pname)
-            return len(search_words & pname_words) * 100 - len(pname)
+            common = len(search_words & pname_words)
+            return common * 100 - len(pname)
         products.sort(key=score, reverse=True)
         return products[0]
-    keywords = [kw for kw in product_name.split() if len(kw) > 2]
-    if len(keywords) >= 2:
-        for i in range(len(keywords)):
-            for j in range(i + 1, len(keywords)):
-                products = rpc.search_read('product.product', [
-                    ['name', 'ilike', keywords[i]], ['name', 'ilike', keywords[j]], ['sale_ok', '=', True]
-                ], fields=['id', 'name', 'list_price'], limit=5)
-                if products:
-                    return products[0]
-    for kw in keywords:
+
+    # Try original name if different from resolved
+    if resolved_name != product_name:
         products = rpc.search_read('product.product', [
-            ['name', 'ilike', kw], ['sale_ok', '=', True]
+            ['name', 'ilike', product_name], ['sale_ok', '=', True], ['active', '=', True]
         ], fields=['id', 'name', 'list_price'], limit=5)
         if products:
             return products[0]
+
+    # Try keyword search
+    keywords = [kw for kw in resolved_name.split() if len(kw) > 2]
+    for kw in keywords:
+        products = rpc.search_read('product.product', [
+            ['name', 'ilike', kw], ['sale_ok', '=', True], ['active', '=', True]
+        ], fields=['id', 'name', 'list_price'], limit=5)
+        if products:
+            return products[0]
+
     return None
 
 
@@ -197,10 +370,12 @@ def create_full_order(order_data, brand):
         customer_vals['state_id'] = state_id
 
     city_name = order_data.get("city", "")
+    city_matched = False
     if city_name and state_id:
         city = find_city(rpc, city_name, state_id)
         if city:
             customer_vals['x_studio_city'] = city['id']
+            city_matched = True
         else:
             customer_vals['city'] = city_name
     elif city_name:
@@ -208,21 +383,21 @@ def create_full_order(order_data, brand):
 
     street = order_data.get("street", "")
     nearest = order_data.get("nearest_landmark", "")
-    full_street = f"{street} - {nearest}" if street and nearest else street or nearest
-    if full_street:
-        customer_vals['street'] = full_street
+    if street:
+        customer_vals['street'] = street
+    if nearest:
+        customer_vals['street2'] = nearest
 
     partner_id = rpc.create('res.partner', customer_vals)
 
     # 2. Create sale order
     carrier = CARRIER_MAP.get(brand, CARRIER_MAP["shahd"])
 
+    # Build shipment notes (without Instagram link)
     notes_parts = []
-    for key in ["province", "city", "street", "nearest_landmark"]:
-        if order_data.get(key):
-            notes_parts.append(order_data[key])
-    if order_data.get("instagram"):
-        notes_parts.append(f"Instagram: {order_data['instagram']}")
+    order_notes = order_data.get("notes", "")
+    if order_notes:
+        notes_parts.append(order_notes)
 
     order_vals = {
         'partner_id': partner_id,
@@ -238,23 +413,28 @@ def create_full_order(order_data, brand):
     unmatched = []
     product_lines = []
     matched_products = []
+    products_total = 0
 
     for item in products_data:
         product = find_product(rpc, item["name"])
         if product:
+            qty = item.get('quantity', 1)
+            is_gift = item.get('is_gift', False)
             line_vals = {
                 'order_id': order_id,
                 'product_id': product['id'],
-                'product_uom_qty': item.get('quantity', 1),
+                'product_uom_qty': qty,
             }
-            is_gift = item.get('is_gift', False)
             if is_gift:
                 line_vals['price_unit'] = 0
                 line_vals['name'] = f"{product['name']} (هدية)"
             line_id = rpc.create('sale.order.line', line_vals)
             product_lines.append(line_id)
+
+            price = 0 if is_gift else product['list_price'] * qty
+            products_total += price
             gift_label = " (هدية)" if is_gift else ""
-            matched_products.append(f"{product['name']} x{item.get('quantity', 1)}{gift_label}")
+            matched_products.append(f"{product['name']} x{qty}{gift_label}")
         else:
             unmatched.append(item["name"])
 
@@ -264,7 +444,7 @@ def create_full_order(order_data, brand):
             'order_id': order_id, 'carrier_id': carrier['carrier_id'], 'delivery_price': 0,
         })
         rpc.call('choose.delivery.carrier', 'button_confirm', [[wiz_id]])
-    except:
+    except Exception:
         rpc.write('sale.order', order_id, {'carrier_id': carrier['carrier_id']})
         rpc.create('sale.order.line', {
             'order_id': order_id, 'product_id': carrier['product_id'],
@@ -272,31 +452,33 @@ def create_full_order(order_data, brand):
             'name': carrier['name'], 'is_delivery': True,
         })
 
-    # 5. Adjust price
-    order_info = rpc.read('sale.order', order_id, fields=['name', 'amount_total'])[0]
-    current_total = order_info['amount_total']
-    order_name = order_info['name']
-
+    # 5. Adjust price - delivery fee = target - products total
     raw_total = order_data.get("total_price", 0)
     target_total = raw_total if raw_total >= 1000 else raw_total * 1000
 
     delivery_fee = 0
-    if target_total > 0 and abs(current_total - target_total) > 100:
+    if target_total > 0:
+        delivery_fee = max(0, target_total - products_total)
+        # Find delivery line and set its price
         delivery_lines = rpc.search_read('sale.order.line', [
             ['order_id', '=', order_id], ['is_delivery', '=', True]
         ], fields=['id', 'price_unit'])
-
-        if delivery_lines and current_total < target_total:
-            delivery_fee = target_total - current_total
+        if delivery_lines:
             rpc.write('sale.order.line', delivery_lines[0]['id'], {'price_unit': delivery_fee})
-        elif current_total > target_total and product_lines:
-            diff = current_total - target_total
-            first_line = rpc.read('sale.order.line', product_lines[0], fields=['price_unit'])
-            old_price = first_line[0]['price_unit']
-            rpc.write('sale.order.line', product_lines[0], {'price_unit': old_price - diff})
 
-        order_info = rpc.read('sale.order', order_id, fields=['amount_total'])[0]
-        current_total = order_info['amount_total']
+        # If products total > target (discount needed), adjust first product line
+        if products_total > target_total and product_lines:
+            diff = products_total - target_total
+            first_line = rpc.read('sale.order.line', product_lines[0], fields=['price_unit'])[0]
+            rpc.write('sale.order.line', product_lines[0], {
+                'price_unit': first_line['price_unit'] - diff
+            })
+            delivery_fee = 0
+
+    # Read final total
+    order_info = rpc.read('sale.order', order_id, fields=['amount_total', 'name'])[0]
+    current_total = order_info['amount_total']
+    order_name = order_info['name']
 
     # 6. Confirm order
     rpc.call('sale.order', 'action_confirm', [[order_id]])
@@ -312,7 +494,11 @@ def create_full_order(order_data, brand):
         "target": target_total,
         "delivery_fee": delivery_fee,
         "carrier": carrier['name'],
-        "url": f"{ODOO_URL}/odoo/sales/{order_id}"
+        "url": f"{ODOO_URL}/odoo/sales/{order_id}",
+        "province": province,
+        "province_matched": bool(state_id),
+        "city": city_name,
+        "city_matched": city_matched,
     }
 
 
@@ -320,12 +506,12 @@ def create_full_order(order_data, brand):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "مرحباً! أنا بوت إدخال الطلبات لأودو 🛒\n\n"
-        "أرسل لي رسالة الطلب من الواتساب وأنا أدخلها بأودو.\n\n"
+        "مرحباً! أنا بوت إدخال الطلبات لأودو.\n\n"
         "الأوامر:\n"
         "/shahd - طلبات شهد بيوتي\n"
         "/marlin - طلبات مارلين\n"
-        "/help - المساعدة"
+        "/help - المساعدة\n\n"
+        "اختر البراند أولاً ثم أرسل الطلبات."
     )
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -334,147 +520,216 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "1. أرسل /shahd أو /marlin لتحديد البراند\n"
         "2. ألصق رسالة الطلب من الواتساب\n"
         "3. راجع البيانات واضغط تأكيد\n\n"
-        "أو ببساطة ألصق الطلب مباشرة وأنا أسألك عن البراند."
+        "يمكنك إرسال عدة طلبات متتالية بدون مشاكل.\n"
+        "البراند يبقى محدد حتى تغيره."
     )
 
 async def set_shahd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['brand'] = 'shahd'
-    await update.message.reply_text("✅ تم تحديد البراند: شهد بيوتي\nأرسل الطلب الحين...")
+    await update.message.reply_text("تم تحديد البراند: شهد بيوتي\nأرسل الطلبات...")
 
 async def set_marlin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['brand'] = 'marlin'
-    await update.message.reply_text("✅ تم تحديد البراند: مارلين\nأرسل الطلب الحين...")
+    await update.message.reply_text("تم تحديد البراند: مارلين\nأرسل الطلبات...")
+
 
 async def handle_order_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle incoming order text."""
+    """Handle incoming order text - supports multiple concurrent orders."""
     message_text = update.message.text
     if message_text.startswith('/'):
         return
 
-    await update.message.reply_text("⏳ جاري تحليل الطلب...")
+    msg = await update.message.reply_text("جاري تحليل الطلب...")
 
     try:
         parsed = parse_with_llm(message_text)
     except Exception as e:
-        await update.message.reply_text(f"❌ خطأ بتحليل الطلب: {e}")
+        await msg.edit_text(f"خطأ بتحليل الطلب: {e}")
         return
 
-    context.user_data['parsed_order'] = parsed
-    context.user_data['raw_message'] = message_text
+    # Validate province
+    province = parsed.get("province", "")
+    state_id = PROVINCE_MAP.get(province)
+    province_warning = ""
+    if not province or not state_id:
+        province_warning = "\n\n⚠️ المحافظة غير محددة أو غير موجودة! لازم تحدد المحافظة الصحيحة."
+
+    # Validate city
+    city = parsed.get("city", "")
+    city_warning = ""
+    if not city:
+        city_warning = "\n⚠️ المنطقة/المدينة غير محددة!"
 
     # Build summary
     products_text = ""
     for p in parsed.get("products", []):
+        resolved = resolve_product_name(p['name'])
         gift = " (هدية)" if p.get("is_gift") else ""
-        products_text += f"  • {p['name']} x{p.get('quantity', 1)}{gift}\n"
+        products_text += f"  - {resolved} x{p.get('quantity', 1)}{gift}\n"
 
     raw_total = parsed.get("total_price", 0)
     total_display = f"{raw_total},000" if raw_total < 1000 else f"{raw_total:,}"
 
+    notes = parsed.get("notes", "")
+    notes_text = f"\nملاحظات: {notes}" if notes else ""
+
     summary = (
-        f"👤 الاسم: {parsed.get('customer_name', '?')}\n"
-        f"📱 الهاتف: {parsed.get('phone', '?')}\n"
-        f"📍 المحافظة: {parsed.get('province', '?')}\n"
-        f"🏘 المدينة: {parsed.get('city', '?')}\n"
-        f"🛣 العنوان: {parsed.get('street', '?')}\n"
-        f"📦 المنتجات:\n{products_text}"
-        f"💰 الإجمالي: {total_display} د.ع"
+        f"الاسم: {parsed.get('customer_name', '?')}\n"
+        f"الهاتف: {parsed.get('phone', '?')}\n"
+        f"المحافظة: {province or '❌ غير محددة'}\n"
+        f"المنطقة: {city or '❌ غير محددة'}\n"
+        f"العنوان: {parsed.get('street', '?')}\n"
+        f"المنتجات:\n{products_text}"
+        f"الإجمالي: {total_display} د.ع"
+        f"{notes_text}"
     )
 
+    # Generate unique order key for this specific order
+    import time
+    order_key = f"order_{int(time.time() * 1000)}"
+    
+    # Store order data with unique key
+    if 'pending_orders' not in context.user_data:
+        context.user_data['pending_orders'] = {}
+    context.user_data['pending_orders'][order_key] = parsed
+
     brand = context.user_data.get('brand')
+
+    # If province or city missing, show warning and ask to fix
+    if province_warning or city_warning:
+        summary += province_warning + city_warning
+        summary += "\n\nأرسل الطلب مرة ثانية بالمحافظة والمنطقة الصحيحة."
+        await msg.edit_text(f"بيانات الطلب:\n\n{summary}")
+        # Remove pending order
+        context.user_data['pending_orders'].pop(order_key, None)
+        return
+
     if brand:
         brand_name = "شهد بيوتي" if brand == "shahd" else "مارلين"
-        summary += f"\n🏷 البراند: {brand_name}"
+        summary += f"\nالبراند: {brand_name}"
+
         keyboard = [
-            [InlineKeyboardButton("✅ تأكيد وإدخال", callback_data="confirm")],
-            [InlineKeyboardButton("❌ إلغاء", callback_data="cancel")]
+            [InlineKeyboardButton("تأكيد وإدخال ✅", callback_data=f"confirm_{order_key}")],
+            [InlineKeyboardButton("إلغاء ❌", callback_data=f"cancel_{order_key}")]
         ]
-        await update.message.reply_text(f"📋 بيانات الطلب:\n\n{summary}", reply_markup=InlineKeyboardMarkup(keyboard))
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await msg.edit_text(f"بيانات الطلب:\n\n{summary}", reply_markup=reply_markup)
     else:
-        context.user_data['pending_summary'] = summary
         keyboard = [
-            [InlineKeyboardButton("شهد بيوتي", callback_data="brand_shahd")],
-            [InlineKeyboardButton("مارلين", callback_data="brand_marlin")]
+            [InlineKeyboardButton("شهد بيوتي", callback_data=f"brand_shahd_{order_key}")],
+            [InlineKeyboardButton("مارلين", callback_data=f"brand_marlin_{order_key}")]
         ]
-        await update.message.reply_text(
-            f"📋 بيانات الطلب:\n\n{summary}\n\n🏷 اختر البراند:",
-            reply_markup=InlineKeyboardMarkup(keyboard)
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await msg.edit_text(
+            f"بيانات الطلب:\n\n{summary}\n\nاختر البراند:",
+            reply_markup=reply_markup
         )
 
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle button callbacks."""
+    """Handle button callbacks - supports multiple orders."""
     query = update.callback_query
     await query.answer()
     data = query.data
 
+    pending = context.user_data.get('pending_orders', {})
+
     if data.startswith("brand_"):
-        brand = data.replace("brand_", "")
+        # Format: brand_shahd_orderkey or brand_marlin_orderkey
+        parts = data.split("_", 2)  # brand, shahd/marlin, orderkey
+        if len(parts) >= 3:
+            brand = parts[1]
+            order_key = parts[2]
+        else:
+            brand = parts[1]
+            order_key = None
+
         context.user_data['brand'] = brand
         brand_name = "شهد بيوتي" if brand == "shahd" else "مارلين"
 
-        summary = context.user_data.get('pending_summary', '')
-        summary += f"\n🏷 البراند: {brand_name}"
+        # Get current message text and append brand
+        current_text = query.message.text
+        # Remove "اختر البراند:" line
+        current_text = current_text.replace("\n\nاختر البراند:", "")
+        current_text += f"\nالبراند: {brand_name}"
+
+        confirm_data = f"confirm_{order_key}" if order_key else "confirm"
+        cancel_data = f"cancel_{order_key}" if order_key else "cancel"
 
         keyboard = [
-            [InlineKeyboardButton("✅ تأكيد وإدخال", callback_data="confirm")],
-            [InlineKeyboardButton("❌ إلغاء", callback_data="cancel")]
+            [InlineKeyboardButton("تأكيد وإدخال ✅", callback_data=confirm_data)],
+            [InlineKeyboardButton("إلغاء ❌", callback_data=cancel_data)]
         ]
-        await query.edit_message_text(f"📋 بيانات الطلب:\n\n{summary}", reply_markup=InlineKeyboardMarkup(keyboard))
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(current_text, reply_markup=reply_markup)
 
-    elif data == "confirm":
-        parsed = context.user_data.get('parsed_order')
+    elif data.startswith("confirm"):
+        # Format: confirm_orderkey
+        order_key = data.replace("confirm_", "") if "_" in data else None
+        parsed = pending.get(order_key) if order_key else context.user_data.get('parsed_order')
         brand = context.user_data.get('brand', 'shahd')
 
         if not parsed:
-            await query.edit_message_text("❌ خطأ: ما لقيت بيانات الطلب. أرسل الطلب مرة ثانية.")
+            await query.edit_message_text("خطأ: ما لقيت بيانات الطلب. أرسل الطلب مرة ثانية.")
             return
 
-        await query.edit_message_text("⏳ جاري إدخال الطلب في أودو...")
+        await query.edit_message_text("جاري إدخال الطلب في أودو... ⏳")
 
         try:
-            result = create_full_order(parsed, brand)
+            result = await asyncio.to_thread(create_full_order, parsed, brand)
 
-            products_list = "\n".join([f"  • {p}" for p in result['products']])
+            products_list = "\n".join([f"  - {p}" for p in result['products']])
             unmatched_text = ""
             if result['unmatched']:
                 unmatched_text = f"\n\n⚠️ منتجات غير موجودة: {', '.join(result['unmatched'])}"
 
             total_match = "✅" if abs(result['total'] - result['target']) < 100 else f"⚠️ (المطلوب: {result['target']:,.0f})"
 
+            warnings = ""
+            if not result.get('province_matched'):
+                warnings += "\n⚠️ المحافظة لم يتم ربطها بالنظام"
+            if not result.get('city_matched'):
+                warnings += "\n⚠️ المنطقة لم يتم ربطها بالنظام"
+
             response = (
-                f"✅ تم إدخال الطلب بنجاح!\n\n"
-                f"🔢 رقم الطلب: {result['order_name']}\n"
-                f"👤 العميل: {result['customer_name']}\n"
-                f"📦 المنتجات:\n{products_list}\n"
-                f"🚚 التوصيل: {result['delivery_fee']:,.0f} د.ع ({result['carrier']})\n"
-                f"💰 الإجمالي: {result['total']:,.0f} د.ع {total_match}"
-                f"{unmatched_text}\n\n"
-                f"🔗 {result['url']}"
+                f"تم إدخال الطلب بنجاح! ✅\n\n"
+                f"رقم الطلب: {result['order_name']}\n"
+                f"العميل: {result['customer_name']}\n"
+                f"المحافظة: {result.get('province', '?')}\n"
+                f"المنطقة: {result.get('city', '?')}\n"
+                f"المنتجات:\n{products_list}\n"
+                f"التوصيل: {result['delivery_fee']:,.0f} د.ع ({result['carrier']})\n"
+                f"الإجمالي: {result['total']:,.0f} د.ع {total_match}"
+                f"{unmatched_text}{warnings}\n\n"
+                f"الرابط: {result['url']}"
             )
             await query.edit_message_text(response)
 
         except Exception as e:
             logger.error(f"Error creating order: {e}", exc_info=True)
-            await query.edit_message_text(f"❌ خطأ بإدخال الطلب:\n{e}\n\nحاول مرة ثانية.")
+            await query.edit_message_text(f"خطأ بإدخال الطلب:\n{e}\n\nحاول مرة ثانية.")
 
-        context.user_data.pop('parsed_order', None)
-        context.user_data.pop('pending_summary', None)
+        # Remove this specific order from pending
+        if order_key:
+            pending.pop(order_key, None)
 
-    elif data == "cancel":
-        await query.edit_message_text("❌ تم إلغاء الطلب.")
-        context.user_data.pop('parsed_order', None)
-        context.user_data.pop('pending_summary', None)
+    elif data.startswith("cancel"):
+        order_key = data.replace("cancel_", "") if "_" in data else None
+        if order_key:
+            pending.pop(order_key, None)
+        await query.edit_message_text("تم إلغاء الطلب. ❌")
 
 
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
+
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("shahd", set_shahd))
     app.add_handler(CommandHandler("marlin", set_marlin))
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_order_message))
+
     print("Bot is running...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 

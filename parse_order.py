@@ -18,50 +18,29 @@ Return ONLY valid JSON with these fields:
 {
   "customer_name": "full name in Arabic",
   "phone": "phone number (Iraqi format 07xxxxxxxxx)",
-  "province": "المحافظة (one of: الأنبار, أربيل, البصرة, بابل, بغداد, دهوك, ديالى, ذي قار, كربلاء, كركوك, ميسان, المثنى, النجف, نينوى, القادسية, صلاح الدين, السليمانية, واسط)",
-  "city": "المدينة/القضاء",
-  "street": "الشارع أو العنوان التفصيلي",
+  "province": "المحافظة (MUST be one of: الأنبار, أربيل, البصرة, بابل, بغداد, دهوك, ديالى, ذي قار, كربلاء, كركوك, ميسان, المثنى, النجف, نينوى, القادسية, صلاح الدين, السليمانية, واسط)",
+  "city": "المدينة/المنطقة/القضاء (e.g. مدينة الصدر, البلديات, الجزيرة, العلام, etc.)",
+  "street": "الشارع أو العنوان التفصيلي (e.g. قطاع 68, شارع صقر, خلف جامع عمر)",
   "nearest_landmark": "أقرب نقطة دالة (if mentioned)",
   "products": [
-    {"name": "product name expanded to full name", "quantity": 1, "notes": "any special notes like هدية or ميني", "is_gift": false}
+    {"name": "product name - use the EXACT abbreviated name from the message", "quantity": 1, "is_gift": false}
   ],
   "total_price": 0,
-  "delivery_fee": 0,
-  "instagram": "instagram URL or handle if mentioned",
-  "notes": "any additional notes"
+  "instagram": "instagram handle only (without URL), empty string if not mentioned",
+  "notes": "ANY additional notes or instructions from the customer (e.g. توصيل بوقت معين, ملاحظات خاصة, etc.). Do NOT include address, phone, name, or product info here."
 }
 
-Rules:
-- Prices are in thousands of Iraqi Dinars (e.g., 51 means 51,000 IQD)
-- If delivery fee is not mentioned, set to 0
-- If total_price includes delivery, try to separate them
-- Products may include free items marked as هدية (gift) - set is_gift=true for these
-- EXPAND abbreviated product names to their full names. Common abbreviations:
-  - "بكج جوز الهند" = "بكج جوز الهند للعناية بالشعر"
-  - "ص كركم" or "صابونة كركم" = "صابونة الكركم"
-  - "ص كركم ميني" = "صابونة الكركم مني"
-  - "غسول عروسة" = "غسول العروسة للوجه والجسم"
-  - "كريم تبيض" = "كريم تبيض العروسة للوجه و الجسم"
-  - "مقشر عروسة" = "مقشر العروسة للوجه والجسم"
-  - "ماسك عروسة" = "ماسك العروسة للوجه والجسم"
-  - "لوشن عروسة" = "لوشن العروسة"
-  - "بكج عروسة" = "بكج العروسة"
-  - "بكج كافيار" = "بكج الكافيار"
-  - "بكج نيلة" = "بكج النيلة الثلاثي"
-  - "بكج انوثة" or "بكج أنوثة" = "كورس الأنوثة للعناية بالجسم"
-  - "بكج الكرسمس" or "بكج كرسمس" or "بكج الكريسمس" = "بكج الكرسمس الحصري"
-  - "كورس بياض" or "كورس بياض وجه" = "كورس بياض الثلج للوجه"
-  - "بكج تشيز" or "بكج التشيز كيك" = "بكج التشيز كيك للعناية الفاخرة بالجسم"
-  - "بكج حساسة" or "بكج مناطق حساسة" = "بكج العناية بالمناطق الحساسة"
-  - "كورس انوثة" = "كورس الأنوثة للعناية بالجسم"
-  - "كورس معالجة" = "كورس معالجة البشرة"
-  - "مبيض العروسة" or "مبيضة العروسة" or "مبيض العروسه" or "مبيضه العروسه" = "كريم  تبيض العروسة للوجه و الجسم"
-  - "مرطب العروسة" or "مرطب العروسه" = "لوشن العروسة"
-  - "عسل الانوثه" or "عسل الانوثة" or "عسل انوثة" = "عسل مسمن مناطق انثوية"
-  - "عسل العام" or "عسل عام" = "عسل مسمن عام"
-  - "عسل وجه" or "عسل الوجه" = "عسل مسمن وجه"
-  - "عسل رجالي" = "عسل رجالي"
-- Phone numbers should be in format 07xxxxxxxxx"""
+CRITICAL RULES:
+- Prices are in thousands of Iraqi Dinars (e.g., 51 means 51,000 IQD, 30 means 30,000 IQD)
+- The total_price is ALWAYS the total including delivery
+- Products marked as هدية (gift) must have is_gift=true
+- For product names, keep them as-is from the message (e.g. "عسل العام", "مبيض العروسه", "بكج الكرسمس") - do NOT expand them
+- A number right after a product name usually means quantity (e.g. "مرطب العروسه2" means quantity=2)
+- Province MUST be extracted correctly from the address
+- City/area MUST be extracted (e.g. from "بغداد مدينه الصدر قطاع 68", province=بغداد, city=مدينة الصدر, street=قطاع 68)
+- Phone numbers should be in format 07xxxxxxxxx
+- Instagram links should be extracted as handle only (e.g. "7.f_sa" from the URL)
+- notes field should capture any delivery instructions or special requests"""
 
     response = client.chat.completions.create(
         model="gpt-4.1-nano",
