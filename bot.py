@@ -111,10 +111,22 @@ PRODUCT_ALIASES = {
     "عسل الانوثة": "عسل مسمن مناطق انثوية",
     "عسل انوثة": "عسل مسمن مناطق انثوية",
     "عسل انوثه": "عسل مسمن مناطق انثوية",
+    "عسل مسمن انوثة": "عسل مسمن مناطق انثوية",
+    "عسل مسمن انوثه": "عسل مسمن مناطق انثوية",
+    "عسل مناطق انثوية": "عسل مسمن مناطق انثوية",
+    "عسل مناطق انثويه": "عسل مسمن مناطق انثوية",
+    "عسل انثوية": "عسل مسمن مناطق انثوية",
+    "عسل انثويه": "عسل مسمن مناطق انثوية",
+    "عسل انوثه 2": "عسل مسمن مناطق انثوية",
+    "عسل انوثة 2": "عسل مسمن مناطق انثوية",
     "عسل العام": "عسل مسمن عام",
     "عسل عام": "عسل مسمن عام",
     "عسل وجه": "عسل مسمن وجه",
     "عسل الوجه": "عسل مسمن وجه",
+    "عسل وجة": "عسل مسمن وجه",
+    "عسل الوجة": "عسل مسمن وجه",
+    "عسل الوجهه": "عسل مسمن وجه",
+    "عسل مسمن وجه": "عسل مسمن وجه",
     "عسل رجالي": "عسل رجالي",
     "كريم الانوثة": "كريم  الأنةثه للعناية بالمناطق الحساسة",
     "كريم الانوثه": "كريم  الأنةثه للعناية بالمناطق الحساسة",
@@ -130,6 +142,10 @@ PRODUCT_ALIASES = {
     "اضافر": "اضافر هديه",
     "ليفة سلكونية": "ليفة سلكونية",
     "ليفه سلكونيه": "ليفة سلكونية",
+    "ليفه سليكون": "ليفة سلكونية",
+    "ليفة سليكون": "ليفة سلكونية",
+    "ليفه سلكون": "ليفة سلكونية",
+    "ليفة سلكون": "ليفة سلكونية",
     "ليفة مغربية": "ليفة مغربية",
     "ليفه مغربيه": "ليفة مغربية",
     "مخمرية": "مخمرية",
@@ -258,6 +274,14 @@ def resolve_product_name(name):
     for alias, real_name in PRODUCT_ALIASES.items():
         if alias.lower() == name_lower:
             return real_name
+    # Try with Arabic normalization: ة/ه swap, ال/without ال
+    name_variants = _normalize_al(name_clean)
+    for variant in name_variants:
+        if variant in PRODUCT_ALIASES:
+            return PRODUCT_ALIASES[variant]
+        for alias, real_name in PRODUCT_ALIASES.items():
+            if alias.lower() == variant.lower():
+                return real_name
     # Try word-based matching: score by how many words match
     name_words = set(name_clean.split())
     best_match = None
@@ -543,8 +567,11 @@ def create_full_order(order_data, brand):
     rpc = OdooRPC()
 
     # 1. Create customer
-    name = order_data.get("customer_name", "")
+    name = order_data.get("customer_name", "").strip()
     phone = order_data.get("phone", "")
+    # If no customer name, use phone number as name
+    if not name:
+        name = phone if phone else "عميل غير محدد"
     province = order_data.get("province", "")
     state_id = PROVINCE_MAP.get(province, False)
 
