@@ -814,7 +814,10 @@ async def handle_order_message(update: Update, context: ContextTypes.DEFAULT_TYP
         products_text += f"  - {resolved} x{p.get('quantity', 1)}{gift}\n"
 
     raw_total = parsed.get("total_price", 0)
-    total_display = f"{raw_total},000" if raw_total < 1000 else f"{raw_total:,}"
+    if raw_total and raw_total > 0:
+        total_display = f"{raw_total},000" if raw_total < 1000 else f"{raw_total:,}"
+    else:
+        total_display = "واصل (سعر المنتجات)"
 
     notes = parsed.get("notes", "")
     notes_text = f"\nملاحظات: {notes}" if notes else ""
@@ -929,7 +932,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if result['unmatched']:
                 unmatched_text = f"\n\n⚠️ منتجات غير موجودة: {', '.join(result['unmatched'])}"
 
-            total_match = "✅" if abs(result['total'] - result['target']) < 100 else f"⚠️ (المطلوب: {result['target']:,.0f})"
+            if result['target'] == 0:
+                total_match = "✅"  # واصل - no price adjustment needed
+            else:
+                total_match = "✅" if abs(result['total'] - result['target']) < 100 else f"⚠️ (المطلوب: {result['target']:,.0f})"
 
             warnings = ""
             if not result.get('province_matched'):

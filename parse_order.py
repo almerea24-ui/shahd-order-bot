@@ -180,6 +180,7 @@ EXAMPLES:
 
 OTHER RULES:
 - Prices are in thousands of Iraqi Dinars (e.g., 50 means 50,000 IQD)
+- If price says "واصل" or "واصله" or "واصلة", set total_price to 0 (means delivery included, use product prices as-is)
 - Products marked as هدية/هديه must have is_gift=true
 - Keep product names as-is from the message
 - A number after product name = quantity (e.g. "عسل العام 2" means quantity=2)
