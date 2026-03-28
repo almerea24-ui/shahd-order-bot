@@ -197,6 +197,25 @@ PRODUCT_ALIASES = {
     "مورد الانوثه": "مورد الأنوثة",
     "حنة": "حنة هدية",
     "حنه": "حنة هدية",
+    "مربى كراميل": "مربى الكرميل",
+    "مربى كراميلل": "مربى الكرميل",
+    "مربى الكراميل": "مربى الكرميل",
+    "مربى الكراميلل": "مربى الكرميل",
+    "مربى كارميل": "مربى الكرميل",
+    "بكج الرموش": "رموش اسبوعية",
+    "بكج رموش": "رموش اسبوعية",
+    "رموش": "رموش اسبوعية",
+    "رموش اسبوعيه": "رموش اسبوعية",
+    "اظافر": "اضافر هديه",
+    "أظافر": "اضافر هديه",
+    "اظافر هدية": "اضافر هديه",
+    "اظافر هديه": "اضافر هديه",
+    "حمرة كولدن روز": "حمرة  كولدن روز",
+    "حمره كولدن روز": "حمرة  كولدن روز",
+    "مسك قريشي": "مسك براهيم القريشي",
+    "مسك القريشي": "مسك براهيم القريشي",
+    "مسك ابراهيم القريشي": "مسك براهيم القريشي",
+    "مسك ابراق": "مسك ابراق",
 }
 
 logging.basicConfig(
@@ -487,8 +506,27 @@ def find_product(rpc, product_name):
             ['name', 'ilike', variant], ['sale_ok', '=', True], ['active', '=', True]
         ], fields=['id', 'name', 'list_price'], limit=10)
         if products:
-            logger.info(f"Arabic variant match: '{products[0]['name']}' (variant: '{variant}')")
-            return products[0]
+            # Score the results to pick the best match, not just the first one
+            best_variant = None
+            best_variant_score = -1
+            for p in products:
+                pname = p['name'].lower()
+                variant_lower = variant.lower()
+                if pname == variant_lower:
+                    best_variant = p
+                    best_variant_score = 10000
+                    break
+                # Check how much of the variant is in the product name
+                variant_words = set(variant_lower.split())
+                pname_words = set(pname.split())
+                common = len(variant_words & pname_words)
+                sc = common * 100 - len(pname)
+                if sc > best_variant_score:
+                    best_variant_score = sc
+                    best_variant = p
+            if best_variant and best_variant_score > 0:
+                logger.info(f"Arabic variant match: '{best_variant['name']}' (variant: '{variant}', score: {best_variant_score})")
+                return best_variant
 
     # Try single keyword search - search by each word individually and score results
     keywords = [kw for kw in resolved_name.split() if len(kw) > 1]
@@ -554,9 +592,36 @@ def find_product(rpc, product_name):
         all_single_results.sort(key=fuzzy_score, reverse=True)
         best = all_single_results[0]
         best_sc = fuzzy_score(best)
-        if best_sc >= 50:  # At least one reasonable keyword match
+        # Require at least 2 keyword matches (score >= 150) when there are 2+ keywords
+        # For single keyword searches, require exact keyword match (score >= 100)
+        min_score = 150 if len(keywords) >= 2 else 100
+        if best_sc >= min_score:
             logger.info(f"Fuzzy single-keyword match: '{best['name']}' (score: {best_sc})")
             return best
+        elif best_sc >= 100 and len(keywords) >= 2:
+            # Only 1 keyword matched out of 2+ - log warning but still return if it's a strong match
+            # Check if the matched keyword is specific enough (not a generic word)
+            generic_words = {'بكج', 'كريم', 'عطر', 'زيت', 'سيروم', 'غسول', 'مقشر', 'لوشن', 'شامبو', 'ماسك', 'مربى', 'عسل', 'كورس', 'صابونة', 'مرطب', 'هدية', 'هديه'}
+            # Check if ALL matched keywords are generic
+            matched_specific = False
+            for kw in keywords:
+                kw_clean = kw.replace('ال', '', 1) if kw.startswith('ال') else kw
+                if kw_clean not in generic_words and kw not in generic_words:
+                    # Check if this specific keyword contributed to the score
+                    kw_lower = kw.lower()
+                    kw_normalized = kw_lower.replace('ة', 'ه').replace('ى', 'ي')
+                    pname = best['name'].lower()
+                    pname_normalized = pname.replace('ة', 'ه').replace('ى', 'ي')
+                    if kw_lower in pname or kw_normalized in pname_normalized:
+                        matched_specific = True
+                        break
+            if matched_specific:
+                logger.info(f"Fuzzy single-keyword match (specific): '{best['name']}' (score: {best_sc})")
+                return best
+            else:
+                logger.warning(f"Fuzzy match rejected - only generic keywords matched: '{best['name']}' (score: {best_sc})")
+        else:
+            logger.warning(f"Fuzzy match too weak: '{best['name']}' (score: {best_sc}, min: {min_score})")
 
     logger.warning(f"No product found for: '{product_name}' (resolved: '{resolved_name}')")
     return None
