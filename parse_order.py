@@ -141,6 +141,15 @@ def _fix_quantities(parsed: dict, original_text: str) -> dict:
                 break
         
         if not found_qty:
+            # Check for x2/X3 pattern (e.g., "بكج الكافيار x2")
+            x_match = re.search(r'[xX×]\s*(\d{1,2})', remaining)
+            if x_match:
+                num = int(x_match.group(1))
+                if 1 <= num <= 20:
+                    product['quantity'] = num
+                    found_qty = True
+        
+        if not found_qty:
             # Check for digit in remaining text
             digit_match = re.search(r'\b(\d{1,2})\b', remaining)
             if digit_match:
@@ -286,7 +295,8 @@ EXAMPLES:
 IMPORTANT: The word RIGHT AFTER the province name is usually the city/area. NEVER set city to "غير محدد" - always extract it from the address text. The first area/place name after the province IS the city.
 
 OTHER RULES:
-- Prices are in thousands of Iraqi Dinars (e.g., 50 means 50,000 IQD)
+- Prices are written as FULL numbers in Iraqi Dinars (e.g., 50000 means 50,000 IQD, 35000 means 35,000 IQD, 120000 means 120,000 IQD)
+- NEVER divide or multiply the price - use the exact number written
 - If price says "واصل" or "واصله" or "واصلة", set total_price to 0 (means delivery included, use product prices as-is)
 - Products marked as هدية/هديه must have is_gift=true
 - Keep product names as-is from the message (WITHOUT the quantity word/number)
@@ -304,6 +314,8 @@ CRITICAL QUANTITY RULES:
   * "عسل العام ثلاثة" → name="عسل العام", quantity=3
   * "مربى كرميل 3" → name="مربى كرميل", quantity=3
   * "عسل عام ثنتين" → name="عسل عام", quantity=2
+  * "بكج الكافيار x2" → name="بكج الكافيار", quantity=2
+  * "عطر فانيلا X3" → name="عطر فانيلا", quantity=3
 - If no quantity is specified on a line, default to 1
 - DO NOT confuse the final price number with a product quantity
 - DO NOT carry over quantities from one product line to another
