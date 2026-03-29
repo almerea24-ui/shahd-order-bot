@@ -232,6 +232,7 @@ def _validate_and_fix(parsed: dict, original_text: str) -> dict:
 def parse_with_llm(message_text: str) -> dict:
     """Use OpenAI-compatible LLM to parse the order message."""
     from openai import OpenAI
+    from config import LLM_MODEL
     client = OpenAI()
 
     system_prompt = """You are an order parser for an Iraqi beauty products business.
@@ -314,7 +315,7 @@ GIFT PRODUCT NAME RULES:
 - Example: "هدية ليفة سلكونيه" → name="ليفة سلكونيه", is_gift=true"""
 
     response = client.chat.completions.create(
-        model="gpt-4.1-nano",
+        model=LLM_MODEL,
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": f"Parse this order:\n\n{message_text}"}
