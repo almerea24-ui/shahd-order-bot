@@ -64,6 +64,108 @@ def _detect_city_from_text(text: str, province: str) -> str:
     return ""
 
 
+# Arabic number words to digits mapping
+ARABIC_NUMBER_WORDS = {
+    'واحد': 1, 'وحده': 1, 'وحدة': 1, 'واحدة': 1, 'واحده': 1,
+    'اثنين': 2, 'اثنينين': 2, 'ثنتين': 2, 'ثنين': 2, 'ثنتان': 2,
+    'ثلاثة': 3, 'ثلاث': 3, 'ثلاثه': 3,
+    'اربعة': 4, 'اربع': 4, 'اربعه': 4, 'أربعة': 4, 'أربع': 4,
+    'خمسة': 5, 'خمس': 5, 'خمسه': 5,
+    'ستة': 6, 'ست': 6, 'سته': 6,
+    'سبعة': 7, 'سبع': 7, 'سبعه': 7,
+    'ثمانية': 8, 'ثمان': 8, 'ثمانيه': 8,
+    'تسعة': 9, 'تسع': 9, 'تسعه': 9,
+    'عشرة': 10, 'عشر': 10, 'عشره': 10,
+}
+
+
+def _fix_quantities(parsed: dict, original_text: str) -> dict:
+    """Fix product quantities by checking original text for Arabic number words.
+    Also ensures each product's quantity comes from its OWN line only."""
+    products = parsed.get('products', [])
+    lines = [l.strip() for l in original_text.strip().split('\n') if l.strip()]
+    
+    # Build a mapping: for each product, find its BEST matching line
+    used_lines = set()
+    product_line_map = []
+    
+    for product in products:
+        pname = product.get('name', '').strip()
+        # Remove هدية/هديه prefix for matching
+        pname_clean = re.sub(r'^(هدية|هديه)\s*', '', pname).strip()
+        
+        best_line = None
+        best_score = 0
+        
+        for idx, line in enumerate(lines):
+            if idx in used_lines:
+                continue
+            # Count how many significant words from product name appear in this line
+            pwords = [w for w in pname_clean.split() if len(w) > 1]
+            if not pwords:
+                continue
+            matches = sum(1 for w in pwords if w in line)
+            score = matches / len(pwords) if pwords else 0
+            
+            if score > best_score:
+                best_score = score
+                best_line = idx
+        
+        if best_line is not None and best_score >= 0.5:
+            used_lines.add(best_line)
+            product_line_map.append((product, lines[best_line]))
+        else:
+            product_line_map.append((product, None))
+    
+    # Now fix quantities based on each product's own line
+    for product, line in product_line_map:
+        if line is None:
+            continue
+        
+        pname = product.get('name', '').strip()
+        pname_clean = re.sub(r'^(هدية|هديه)\s*', '', pname).strip()
+        
+        # Get remaining text after removing product name words
+        remaining = line
+        for w in pname_clean.split():
+            remaining = remaining.replace(w, '', 1)
+        # Also remove هدية/هديه
+        remaining = re.sub(r'(هدية|هديه)', '', remaining).strip()
+        
+        # Check for Arabic number words in remaining text
+        found_qty = False
+        for word, num in sorted(ARABIC_NUMBER_WORDS.items(), key=lambda x: len(x[0]), reverse=True):
+            if word in remaining:
+                product['quantity'] = num
+                found_qty = True
+                break
+        
+        if not found_qty:
+            # Check for digit in remaining text
+            digit_match = re.search(r'\b(\d{1,2})\b', remaining)
+            if digit_match:
+                num = int(digit_match.group(1))
+                if 1 <= num <= 20:
+                    product['quantity'] = num
+                    found_qty = True
+        
+        if not found_qty:
+            # No quantity found on this line - default to 1
+            product['quantity'] = 1
+    
+    # Clean product names: remove هدية/هديه prefix if present
+    for product in products:
+        name = product.get('name', '')
+        name = re.sub(r'^(هدية|هديه)\s*', '', name).strip()
+        # Remove any Arabic number words from the name
+        for word in ARABIC_NUMBER_WORDS:
+            if name.endswith(' ' + word):
+                name = name[:-(len(word)+1)].strip()
+        product['name'] = name
+    
+    return parsed
+
+
 def _validate_and_fix(parsed: dict, original_text: str) -> dict:
     """Validate and fix province/city extraction using the original text."""
     
@@ -177,14 +279,39 @@ EXAMPLES:
 - "بغداد مدينه الصدر قطاع 68" → province=بغداد, city=مدينة الصدر, street=قطاع 68
 - "البصره جامعة الكرمه" → province=البصرة, city=جامعة الكرمه
 - "كربلاء حي الغدير قرب الكفيل" → province=كربلاء, city=حي الغدير, street=قرب الكفيل
+- "اربيل امباير رويال فيلا 230" → province=أربيل, city=امباير, street=رويال فيلا 230
+- "بغداد باب شرجي" → province=بغداد, city=باب شرجي
+
+IMPORTANT: The word RIGHT AFTER the province name is usually the city/area. NEVER set city to "غير محدد" - always extract it from the address text. The first area/place name after the province IS the city.
 
 OTHER RULES:
 - Prices are in thousands of Iraqi Dinars (e.g., 50 means 50,000 IQD)
 - If price says "واصل" or "واصله" or "واصلة", set total_price to 0 (means delivery included, use product prices as-is)
 - Products marked as هدية/هديه must have is_gift=true
-- Keep product names as-is from the message
-- A number after product name = quantity (e.g. "عسل العام 2" means quantity=2)
-- Phone numbers format: 07xxxxxxxxx"""
+- Keep product names as-is from the message (WITHOUT the quantity word/number)
+- Phone numbers format: 07xxxxxxxxx
+
+CRITICAL QUANTITY RULES:
+- A quantity number/word ON THE SAME LINE as a product name = quantity for THAT product ONLY
+- Each product line is independent - a quantity on one line does NOT apply to other lines
+- Numbers can be in Arabic digits (1, 2, 3...) or Arabic words (واحد, اثنين, ثلاثة, اربعة, خمسة, ستة, سبعة, ثمانية, تسعة, عشرة)
+- Iraqi dialect numbers: وحده=1, ثنتين=2, ثلاث=3, اربع=4, خمس=5
+- The quantity word/number should NOT be included in the product name
+- Examples:
+  * "عطر ماي سول اثنين" → name="عطر ماي سول", quantity=2
+  * "عطر ماي سول 2" → name="عطر ماي سول", quantity=2
+  * "عسل العام ثلاثة" → name="عسل العام", quantity=3
+  * "مربى كرميل 3" → name="مربى كرميل", quantity=3
+  * "عسل عام ثنتين" → name="عسل عام", quantity=2
+- If no quantity is specified on a line, default to 1
+- DO NOT confuse the final price number with a product quantity
+- DO NOT carry over quantities from one product line to another
+
+GIFT PRODUCT NAME RULES:
+- When a line starts with "هدية" or "هديه", set is_gift=true and REMOVE the word "هدية"/"هديه" from the product name
+- Example: "هدية مسك قريشي" → name="مسك قريشي", is_gift=true
+- Example: "هدية بكج الرموش" → name="بكج الرموش", is_gift=true
+- Example: "هدية ليفة سلكونيه" → name="ليفة سلكونيه", is_gift=true"""
 
     response = client.chat.completions.create(
         model="gpt-4.1-nano",
@@ -200,5 +327,8 @@ OTHER RULES:
     
     # Validate and fix using our own logic
     parsed = _validate_and_fix(parsed, message_text)
+    
+    # Fix quantities using Arabic number words detection
+    parsed = _fix_quantities(parsed, message_text)
     
     return parsed

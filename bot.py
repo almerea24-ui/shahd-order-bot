@@ -649,18 +649,63 @@ def create_full_order(order_data, brand):
         customer_vals['state_id'] = state_id
 
     city_name = order_data.get("city", "")
+    street = order_data.get("street", "")
     city_matched = False
+    
     if city_name and state_id:
         city = find_city(rpc, city_name, state_id)
         if city:
             customer_vals['x_studio_city'] = city['id']
             city_matched = True
         else:
-            customer_vals['city'] = city_name
+            # City not matched - try to find city from street text as fallback
+            if street:
+                # Try each word/phrase from street against city database
+                street_words = street.split()
+                for i in range(len(street_words)):
+                    # Try single word and two-word combinations
+                    for length in [2, 1]:
+                        if i + length <= len(street_words):
+                            candidate = ' '.join(street_words[i:i+length])
+                            city_result = find_city(rpc, candidate, state_id)
+                            if city_result:
+                                customer_vals['x_studio_city'] = city_result['id']
+                                city_matched = True
+                                logger.info(f"City found from street fallback: '{city_result['x_name']}' (searched: '{candidate}')")
+                                break
+                    if city_matched:
+                        break
+            
+            # Also try combining city + first word of street
+            if not city_matched and street:
+                combined = f"{city_name} {street.split()[0]}"
+                city_result = find_city(rpc, combined, state_id)
+                if city_result:
+                    customer_vals['x_studio_city'] = city_result['id']
+                    city_matched = True
+                    logger.info(f"City found from combined fallback: '{city_result['x_name']}'")
+            
+            if not city_matched:
+                customer_vals['city'] = city_name
     elif city_name:
         customer_vals['city'] = city_name
+    
+    # If still no city matched and we have street, try street words against city DB
+    if not city_matched and state_id and street:
+        street_words = street.split()
+        for i in range(len(street_words)):
+            for length in [2, 1]:
+                if i + length <= len(street_words):
+                    candidate = ' '.join(street_words[i:i+length])
+                    city_result = find_city(rpc, candidate, state_id)
+                    if city_result:
+                        customer_vals['x_studio_city'] = city_result['id']
+                        city_matched = True
+                        logger.info(f"City found from street-only fallback: '{city_result['x_name']}'")
+                        break
+            if city_matched:
+                break
 
-    street = order_data.get("street", "")
     nearest = order_data.get("nearest_landmark", "")
     if street:
         customer_vals['street'] = street
@@ -717,65 +762,64 @@ def create_full_order(order_data, brand):
         else:
             unmatched.append(item["name"])
 
-    # 4. Add delivery via wizard
+    # 4. Add delivery via wizard - let the carrier set its own price (DO NOT modify shipping price)
+    delivery_fee = 0
     try:
         wiz_id = rpc.create('choose.delivery.carrier', {
-            'order_id': order_id, 'carrier_id': carrier['carrier_id'], 'delivery_price': 0,
+            'order_id': order_id, 'carrier_id': carrier['carrier_id'],
         })
         rpc.call('choose.delivery.carrier', 'button_confirm', [[wiz_id]])
     except Exception:
         rpc.write('sale.order', order_id, {'carrier_id': carrier['carrier_id']})
         rpc.create('sale.order.line', {
             'order_id': order_id, 'product_id': carrier['product_id'],
-            'product_uom_qty': 1, 'price_unit': 0,
+            'product_uom_qty': 1, 'price_unit': 5000,
             'name': carrier['name'], 'is_delivery': True,
         })
 
-    # 5. Adjust price - delivery fee = target - products total
+    # Read delivery fee that was set by the carrier
+    delivery_lines = rpc.search_read('sale.order.line', [
+        ['order_id', '=', order_id], ['is_delivery', '=', True]
+    ], fields=['id', 'price_unit'])
+    if delivery_lines:
+        delivery_fee = delivery_lines[0]['price_unit']
+        # If delivery price is 0 or 1 (default), set it to 5000
+        if delivery_fee <= 1:
+            delivery_fee = 5000
+            rpc.write('sale.order.line', delivery_lines[0]['id'], {'price_unit': 5000})
+        logger.info(f"Delivery fee from carrier: {delivery_fee}")
+
+    # 5. Adjust price using DISCOUNT line only - NEVER modify product prices or shipping price
     raw_total = order_data.get("total_price", 0)
     target_total = raw_total if raw_total >= 1000 else raw_total * 1000
 
-    delivery_fee = 0
-    if target_total > 0:
-        delivery_fee = max(0, target_total - products_total)
-        # Find delivery line and set its price
-        delivery_lines = rpc.search_read('sale.order.line', [
-            ['order_id', '=', order_id], ['is_delivery', '=', True]
-        ], fields=['id', 'price_unit'])
-        if delivery_lines:
-            rpc.write('sale.order.line', delivery_lines[0]['id'], {'price_unit': delivery_fee})
-
-        # If products total > target (discount needed), adjust first product line
-        if products_total > target_total and product_lines:
-            diff = products_total - target_total
-            first_line = rpc.read('sale.order.line', product_lines[0], fields=['price_unit'])[0]
-            rpc.write('sale.order.line', product_lines[0], {
-                'price_unit': first_line['price_unit'] - diff
-            })
-            delivery_fee = 0
-
-    # Read final total and force-adjust if needed
+    # Read current order total (products + shipping)
     order_info = rpc.read('sale.order', order_id, fields=['amount_total', 'name'])[0]
     current_total = order_info['amount_total']
     order_name = order_info['name']
 
-    # Force-adjust: if target_total is set and current_total doesn't match, fix it
     if target_total > 0 and abs(current_total - target_total) > 1:
-        diff = target_total - current_total
-        logger.info(f"Price adjustment needed: current={current_total}, target={target_total}, diff={diff}")
-        if product_lines:
-            # Adjust first product line price to make total match
-            first_line_data = rpc.read('sale.order.line', product_lines[0], fields=['price_unit', 'product_uom_qty'])[0]
-            old_price = first_line_data['price_unit']
-            qty = first_line_data['product_uom_qty'] or 1
-            # diff is spread across qty
-            new_price = old_price + (diff / qty)
-            rpc.write('sale.order.line', product_lines[0], {'price_unit': new_price})
-            logger.info(f"Adjusted first product line price: {old_price} -> {new_price}")
-            # Re-read total
-            order_info = rpc.read('sale.order', order_id, fields=['amount_total', 'name'])[0]
-            current_total = order_info['amount_total']
-            logger.info(f"New total after adjustment: {current_total}")
+        discount_amount = current_total - target_total
+        if discount_amount > 0:
+            # Add a Discount line with negative price to reduce total
+            DISCOUNT_PRODUCT_ID = 176  # 'Discount' product in Odoo
+            rpc.create('sale.order.line', {
+                'order_id': order_id,
+                'product_id': DISCOUNT_PRODUCT_ID,
+                'product_uom_qty': 1,
+                'price_unit': -discount_amount,
+                'name': 'Discount',
+            })
+            logger.info(f"Added discount line: -{discount_amount} (current={current_total}, target={target_total})")
+        elif discount_amount < 0:
+            # Target is higher than current - this means customer is paying more (rare)
+            # Just log it, don't add anything
+            logger.info(f"Customer paying more than product total: current={current_total}, target={target_total}")
+
+        # Re-read total after discount
+        order_info = rpc.read('sale.order', order_id, fields=['amount_total', 'name'])[0]
+        current_total = order_info['amount_total']
+        logger.info(f"Final total after discount: {current_total}")
 
     # 6. Confirm order
     rpc.call('sale.order', 'action_confirm', [[order_id]])
