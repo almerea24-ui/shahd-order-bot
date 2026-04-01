@@ -60,7 +60,7 @@ ODOO_RETRY_DELAY = 1  # seconds
 DUPLICATE_WINDOW_MINUTES = int(os.environ.get("DUPLICATE_WINDOW_MINUTES", "30"))
 
 # --- LLM ---
-LLM_MODEL = os.environ.get("LLM_MODEL", "gpt-4.1-nano")
+LLM_MODEL = "gpt-4.1-mini"
 
 # --- Carrier Map ---
 CARRIER_MAP = {

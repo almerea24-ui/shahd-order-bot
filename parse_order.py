@@ -178,6 +178,11 @@ def _fix_quantities(parsed: dict, original_text: str) -> dict:
 def _validate_and_fix(parsed: dict, original_text: str) -> dict:
     """Validate and fix province/city extraction using the original text."""
     
+    # 0. Fix shorthand price (e.g., 75 → 75000, 50 → 50000)
+    price = parsed.get('total_price', 0)
+    if isinstance(price, (int, float)) and 0 < price < 1000:
+        parsed['total_price'] = int(price * 1000)
+    
     # 1. Fix province - use our own detection as backup/override
     llm_province = parsed.get("province", "")
     detected_province = _detect_province_from_text(original_text)
@@ -239,10 +244,10 @@ def _validate_and_fix(parsed: dict, original_text: str) -> dict:
 
 
 def parse_with_llm(message_text: str) -> dict:
-    """Use OpenAI-compatible LLM to parse the order message."""
+    """Use OpenAI GPT-4.1-mini to parse the order message."""
     from openai import OpenAI
-    from config import LLM_MODEL
-    client = OpenAI()
+    from config import OPENAI_API_KEY
+    client = OpenAI(api_key=OPENAI_API_KEY)
 
     system_prompt = """You are an order parser for an Iraqi beauty products business.
 Extract order details from WhatsApp messages in Arabic/Iraqi dialect.
@@ -324,19 +329,45 @@ GIFT PRODUCT NAME RULES:
 - When a line starts with "هدية" or "هديه", set is_gift=true and REMOVE the word "هدية"/"هديه" from the product name
 - Example: "هدية مسك قريشي" → name="مسك قريشي", is_gift=true
 - Example: "هدية بكج الرموش" → name="بكج الرموش", is_gift=true
-- Example: "هدية ليفة سلكونيه" → name="ليفة سلكونيه", is_gift=true"""
+- Example: "هدية ليفة سلكونيه" → name="ليفة سلكونيه", is_gift=true
+
+CRITICAL: NEVER SKIP ANY PRODUCT LINE!
+- ALL lines that look like product names MUST be included in the products list
+- The first line of the message is often the FIRST PRODUCT, not the customer name
+- Customer name is usually a PERSON'S NAME (e.g., سراب صبري, أميرة غنام, ام محمد)
+- Product lines are things like: بكج العروسة, عطر ماي سول, عسل الانوثه, مربى كرميل, etc.
+- If the first line is a product name (not a person's name), include it as the FIRST product
+- Example: if message starts with "بكج العروسة" then "بكج العروسة" is a product, NOT the customer name
+- Example order:
+  أميرة غنام        ← customer_name
+  بكج العروسه      ← product 1
+  عسل الانوثه 2    ← product 2, quantity=2
+  هدية اضافر 2     ← product 3, is_gift=true, quantity=2
+
+PRICE SHORTHAND RULES:
+- Prices can be written as short numbers: 75 means 75,000 IQD, 50 means 50,000 IQD, 45 means 45,000 IQD
+- If the price is a small number (less than 1000), multiply by 1000 to get the real price
+- Examples: "سعر 75" → total_price=75000, "الحساب 50" → total_price=50000, "128" → total_price=128000
+- If price is already large (e.g., 75000, 50000), use as-is
+- The word "سعر" or "الحساب" or "السعر" before a number means it's the price"""
+
+    full_prompt = system_prompt + f"\n\nParse this order and return ONLY valid JSON (no markdown, no code blocks):\n\n{message_text}"
 
     response = client.chat.completions.create(
-        model=LLM_MODEL,
+        model="gpt-4.1-mini",
         messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"Parse this order:\n\n{message_text}"}
+            {"role": "system", "content": "You are an order parser. Return ONLY valid JSON, no markdown."},
+            {"role": "user", "content": full_prompt}
         ],
         temperature=0,
         response_format={"type": "json_object"}
     )
 
-    parsed = json.loads(response.choices[0].message.content)
+    raw = response.choices[0].message.content.strip()
+    # Remove markdown code blocks if present
+    raw = re.sub(r'^```(?:json)?\s*', '', raw)
+    raw = re.sub(r'\s*```$', '', raw)
+    parsed = json.loads(raw)
     
     # Validate and fix using our own logic
     parsed = _validate_and_fix(parsed, message_text)
