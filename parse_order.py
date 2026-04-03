@@ -240,6 +240,41 @@ def _validate_and_fix(parsed: dict, original_text: str) -> dict:
     if not parsed.get("street") and parsed.get("nearest_landmark"):
         parsed["street"] = parsed["nearest_landmark"]
     
+    # 5. Check if LLM put a product name in customer_name by mistake
+    # Product indicator words - if customer_name contains these, it's probably a product
+    PRODUCT_KEYWORDS = [
+        'بكج', 'عسل', 'كريم', 'غسول', 'لوشن', 'مقشر', 'مربى', 'عطر', 'كورس',
+        'زيت', 'شامبو', 'سيروم', 'ماسك', 'تنت', 'صابونة', 'حمرة', 'رموش', 'اضافر', 'ليفة',
+        'سبلاش', 'قناع', 'مورد', 'سيروم', 'واقي', 'مخمرية', 'شاي'
+    ]
+    customer_name = parsed.get('customer_name', '')
+    customer_name_lower = customer_name.strip().lower()
+    is_product_name = any(kw in customer_name_lower for kw in PRODUCT_KEYWORDS)
+    
+    if is_product_name:
+        # LLM put a product in customer_name - move it to products list as first item
+        products = parsed.get('products', [])
+        # Check if this product is already in the list
+        already_in_list = any(
+            customer_name.strip() in p.get('name', '') or p.get('name', '') in customer_name.strip()
+            for p in products
+        )
+        if not already_in_list:
+            products.insert(0, {'name': customer_name.strip(), 'quantity': 1, 'is_gift': False})
+            parsed['products'] = products
+        # Try to find the real customer name from the original text
+        lines = [l.strip() for l in original_text.strip().split('\n') if l.strip()]
+        for line in lines:
+            line_has_product = any(kw in line for kw in PRODUCT_KEYWORDS)
+            line_has_phone = bool(re.search(r'07\d{9}', line))
+            line_has_price = bool(re.search(r'سعر|\d{4,}', line))
+            if not line_has_product and not line_has_phone and not line_has_price:
+                # Could be customer name - check if it looks like a name (2+ Arabic words, no numbers)
+                words = line.split()
+                if 1 <= len(words) <= 4 and not re.search(r'\d', line):
+                    parsed['customer_name'] = line
+                    break
+    
     return parsed
 
 
@@ -340,9 +375,14 @@ CRITICAL: NEVER SKIP ANY PRODUCT LINE!
 - Example: if message starts with "بكج العروسة" then "بكج العروسة" is a product, NOT the customer name
 - Example order:
   أميرة غنام        ← customer_name
-  بكج العروسه      ← product 1
+  بكج العروسه      ← product 1 (موجود في products list!)
   عسل الانوثه 2    ← product 2, quantity=2
   هدية اضافر 2     ← product 3, is_gift=true, quantity=2
+
+DO NOT put a product name in customer_name field!
+- If a line contains words like: بكج, عسل, كريم, غسول, لوشن, مقشر, مربى, عطر, كورس, زيت, شامبو, سيروم, ماسك, تنت, صابونة, حمرة, رموش, اضافر, ليفة = it is a PRODUCT, not a customer name!
+- Customer names are human names: أميرة, سراب, محمد, احمد, زينب, فاطمة, ام فلان, ابو فلان, etc.
+- ALWAYS count the products: if the order has N product lines, the products array MUST have N items
 
 PRICE SHORTHAND RULES:
 - Prices can be written as short numbers: 75 means 75,000 IQD, 50 means 50,000 IQD, 45 means 45,000 IQD

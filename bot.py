@@ -205,8 +205,10 @@ def create_full_order(order_data, brand):
             rpc.write('sale.order.line', delivery_lines[0]['id'], {'price_unit': 5000})
 
     # 5. Adjust price with Discount line
+    # NOTE: total_price is already normalized to full IQD by parse_order._validate_and_fix
+    # (e.g., 75 → 75000). We trust that value directly.
     raw_total = order_data.get("total_price", 0)
-    target_total = raw_total if raw_total >= 1000 else raw_total * 1000
+    target_total = int(raw_total) if raw_total else 0
 
     order_info = rpc.read('sale.order', order_id, fields=['amount_total', 'name'])[0]
     current_total = order_info['amount_total']
@@ -468,7 +470,8 @@ async def handle_order_message(update: Update, context: ContextTypes.DEFAULT_TYP
 
     raw_total = parsed.get("total_price", 0)
     if raw_total and raw_total > 0:
-        total_display = f"{raw_total},000" if raw_total < 1000 else f"{raw_total:,}"
+        # total_price is already normalized to full IQD (e.g., 75000 not 75)
+        total_display = f"{int(raw_total):,}"
     else:
         total_display = "واصل (سعر المنتجات)"
 
