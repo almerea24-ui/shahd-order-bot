@@ -79,6 +79,185 @@ ARABIC_NUMBER_WORDS = {
 }
 
 
+# All known product keywords - any line containing these is a product line
+PRODUCT_LINE_KEYWORDS = [
+    'بكج', 'عسل', 'كريم', 'غسول', 'لوشن', 'مقشر', 'مربى', 'عطر', 'كورس',
+    'زيت', 'شامبو', 'سيروم', 'ماسك', 'تنت', 'صابونة', 'صابونه', 'حمرة', 'حمره', 'رموش',
+    'اضافر', 'اظافر', 'اضاضر', 'ليفة', 'ليفه', 'سبلاش', 'قناع', 'مورد', 'واقي',
+    'مخمرية', 'شاي', 'مكس', 'بياض', 'نيلة', 'كافيار', 'مسك', 'حنة', 'حنه',
+    'مبيض', 'مبيضة', 'مرطب', 'كريمة', 'بودر', 'مسحوق', 'بخاخ', 'سكراب', 'صبغة'
+]
+
+# Lines that are NOT products (address/phone/price/notes indicators)
+NON_PRODUCT_PATTERNS = [
+    r'\d{10,}',           # phone numbers
+    r'07\d{8,}',          # Iraqi phone
+    r'سعر\s*\d',            # price line
+    r'الحساب\s*\d',         # price line
+    r'السعر\s*\d',           # price line
+    r'العنوان',           # address line
+    r'بغداد|\u0628صرة|نجف|كربلاء|موصل',  # cities
+    r'طابق|بناية|عمارة|شارع|زقاق',  # address details
+    r'رقم التلفون|رقم التليفون|هذا رقم',  # phone label
+    r'الاسم\s*:|\u0627لاسم\s*:',    # name label
+    r'شوف الطلب|شسالفه|الله يخليك',  # notes
+    r'^الاسم',              # starts with الاسم
+]
+
+
+def _is_product_line(line: str) -> bool:
+    """Check if a text line looks like a product line."""
+    line_clean = line.strip()
+    if not line_clean:
+        return False
+    
+    # Check non-product patterns first
+    for pattern in NON_PRODUCT_PATTERNS:
+        if re.search(pattern, line_clean):
+            return False
+    
+    # Remove هدية/هديه prefix for keyword check
+    line_check = re.sub(r'^(\u0647\u062f\u064a\u0629|\u0647\u062f\u064a\u0647)\s*', '', line_clean).strip()
+    
+    # Check if line contains any product keyword
+    for kw in PRODUCT_LINE_KEYWORDS:
+        if kw in line_check:
+            return True
+    
+    return False
+
+
+def _extract_product_lines_from_text(text: str) -> list:
+    """
+    Extract product lines from raw order text.
+    Returns list of dicts: [{name, quantity, is_gift}]
+    """
+    lines = [l.strip() for l in text.strip().split('\n') if l.strip()]
+    products = []
+    
+    for line in lines:
+        if not _is_product_line(line):
+            continue
+        
+        is_gift = bool(re.match(r'^(\u0647\u062f\u064a\u0629|\u0647\u062f\u064a\u0647)\s+', line))
+        # Remove هدية/هديه prefix
+        name = re.sub(r'^(\u0647\u062f\u064a\u0629|\u0647\u062f\u064a\u0647)\s+', '', line).strip()
+        
+        # Extract quantity from line
+        quantity = 1
+        # Check for x2/X3 pattern
+        x_match = re.search(r'[xX×]\s*(\d{1,2})$', name)
+        if x_match:
+            quantity = int(x_match.group(1))
+            name = name[:x_match.start()].strip()
+        else:
+            # Check for trailing digit
+            digit_match = re.search(r'\s+(\d{1,2})$', name)
+            if digit_match:
+                num = int(digit_match.group(1))
+                if 1 <= num <= 20:
+                    quantity = num
+                    name = name[:digit_match.start()].strip()
+            else:
+                # Check for Arabic number words at end
+                for word, num in sorted(ARABIC_NUMBER_WORDS.items(), key=lambda x: len(x[0]), reverse=True):
+                    if name.endswith(' ' + word):
+                        quantity = num
+                        name = name[:-(len(word)+1)].strip()
+                        break
+        
+        products.append({'name': name, 'quantity': quantity, 'is_gift': is_gift})
+    
+    return products
+
+
+def _merge_products(llm_products: list, extracted_products: list) -> list:
+    """
+    Merge LLM-extracted products with Python-extracted products.
+    If Python found more products, add the missing ones.
+    The Python extraction is the ground truth for WHICH products exist.
+    """
+    from product_aliases import PRODUCT_ALIASES
+    
+    if not extracted_products:
+        return llm_products
+    
+    # If LLM returned nothing or fewer products, use extracted as base
+    if not llm_products:
+        return extracted_products
+    
+    def _resolve_alias(name: str) -> str:
+        """Resolve a product name through aliases."""
+        name_lower = name.strip().lower()
+        for alias, resolved in PRODUCT_ALIASES.items():
+            if alias.lower() == name_lower:
+                return resolved.lower()
+        return name_lower
+    
+    # Check if each extracted product is represented in LLM products
+    def _name_similar(a: str, b: str) -> bool:
+        """Check if two product names are similar enough."""
+        # First try alias resolution
+        a_resolved = _resolve_alias(a)
+        b_resolved = _resolve_alias(b)
+        if a_resolved == b_resolved:
+            return True
+        
+        a_clean = re.sub(r'[\s]', '', a_resolved)
+        b_clean = re.sub(r'[\s]', '', b_resolved)
+        # Check if one contains the other (at least 3 chars)
+        if len(a_clean) >= 3 and len(b_clean) >= 3:
+            if a_clean in b_clean or b_clean in a_clean:
+                return True
+        # Check word overlap
+        a_words = set(w for w in a.split() if len(w) > 1)
+        b_words = set(w for w in b.split() if len(w) > 1)
+        if a_words and b_words:
+            overlap = len(a_words & b_words) / min(len(a_words), len(b_words))
+            if overlap >= 0.5:
+                return True
+        return False
+    
+    # Build final merged list - use extracted order as the canonical order
+    merged = []
+    used_llm_indices = set()
+    
+    for ext_prod in extracted_products:
+        # Find matching LLM product
+        best_match = None
+        best_idx = -1
+        for i, llm_prod in enumerate(llm_products):
+            if i in used_llm_indices:
+                continue
+            if _name_similar(ext_prod['name'], llm_prod.get('name', '')):
+                best_match = llm_prod
+                best_idx = i
+                break
+        
+        if best_match is not None:
+            # Use LLM product but ensure gift flag and quantity are correct
+            used_llm_indices.add(best_idx)
+            # Trust Python for is_gift (more reliable)
+            best_match['is_gift'] = ext_prod['is_gift'] or best_match.get('is_gift', False)
+            # Trust Python for quantity if LLM says 1 but Python found more
+            if best_match.get('quantity', 1) == 1 and ext_prod['quantity'] > 1:
+                best_match['quantity'] = ext_prod['quantity']
+            merged.append(best_match)
+        else:
+            # Product not found in LLM output - add from Python extraction
+            merged.append(ext_prod)
+    
+    # Add any LLM products not matched (edge case)
+    for i, llm_prod in enumerate(llm_products):
+        if i not in used_llm_indices:
+            # Check if it's not already in merged
+            already = any(_name_similar(llm_prod.get('name', ''), m.get('name', '')) for m in merged)
+            if not already:
+                merged.append(llm_prod)
+    
+    return merged
+
+
 def _fix_quantities(parsed: dict, original_text: str) -> dict:
     """Fix product quantities by checking original text for Arabic number words.
     Also ensures each product's quantity comes from its OWN line only."""
@@ -411,6 +590,14 @@ PRICE SHORTHAND RULES:
     
     # Validate and fix using our own logic
     parsed = _validate_and_fix(parsed, message_text)
+    
+    # CRITICAL: Extract products directly from text and merge with LLM output
+    # This ensures no product line is ever skipped by the LLM
+    extracted_products = _extract_product_lines_from_text(message_text)
+    if extracted_products:
+        llm_products = parsed.get('products', [])
+        merged = _merge_products(llm_products, extracted_products)
+        parsed['products'] = merged
     
     # Fix quantities using Arabic number words detection
     parsed = _fix_quantities(parsed, message_text)
