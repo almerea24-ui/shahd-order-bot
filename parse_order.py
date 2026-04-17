@@ -461,7 +461,10 @@ def parse_with_llm(message_text: str) -> dict:
     """Use OpenAI GPT-4.1-mini to parse the order message."""
     from openai import OpenAI
     from config import OPENAI_API_KEY
-    client = OpenAI(api_key=OPENAI_API_KEY)
+    client = OpenAI(
+        api_key=OPENAI_API_KEY,
+        base_url='https://api.openai.com/v1'
+    )
 
     system_prompt = """You are an order parser for an Iraqi beauty products business.
 Extract order details from WhatsApp messages in Arabic/Iraqi dialect.
