@@ -124,7 +124,7 @@ class OdooRPC:
         logger.info("Refreshing product cache...")
         products = self.search_read('product.product', [
             ['sale_ok', '=', True], ['active', '=', True]
-        ], fields=['id', 'name', 'list_price', 'qty_available'], limit=500)
+        ], fields=['id', 'name', 'list_price', 'qty_available', 'categ_id'], limit=500)
         self._product_cache = products
         self._product_cache_time = now
         logger.info("Product cache refreshed: %d products", len(products))
@@ -163,7 +163,7 @@ class OdooRPC:
             products = self.search_read('product.product', [
                 ['name', 'ilike', product_name_or_id],
                 ['sale_ok', '=', True], ['active', '=', True]
-            ], fields=['id', 'name', 'qty_available', 'virtual_available'], limit=5)
+            ], fields=['id', 'name', 'qty_available', 'virtual_available', 'categ_id'], limit=5)
             results = []
             for p in products:
                 results.append({

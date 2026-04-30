@@ -144,13 +144,28 @@ def resolve_product_name(name: str) -> str:
     return name_clean
 
 
-def find_product(rpc: OdooRPC, product_name: str):
+def find_product(rpc: OdooRPC, product_name: str, brand: str = None):
     """Find product using cached catalog + fuzzy matching."""
     resolved_name = resolve_product_name(product_name)
     logger.info(f"Product lookup: '{product_name}' -> resolved: '{resolved_name}'")
 
     # Get cached products
     all_products = rpc.get_all_products()
+    
+    # Filter by brand if provided
+    if brand:
+        filtered_products = []
+        for p in all_products:
+            categ_name = p.get('categ_id', [0, ''])[1] if p.get('categ_id') else ''
+            if brand == 'shahd':
+                # Ignore Marlin products
+                if 'مارلين' not in categ_name:
+                    filtered_products.append(p)
+            elif brand == 'marlin':
+                # Ignore Shahd products
+                if 'شهد' not in categ_name:
+                    filtered_products.append(p)
+        all_products = filtered_products
 
     # 1. Exact match
     for p in all_products:
@@ -205,9 +220,13 @@ def find_product(rpc: OdooRPC, product_name: str):
         return best_kw
 
     # 5. Fallback to Odoo search (for edge cases not in cache)
-    products = rpc.search_read('product.product', [
-        ['name', 'ilike', resolved_name], ['sale_ok', '=', True], ['active', '=', True]
-    ], fields=['id', 'name', 'list_price', 'qty_available'], limit=5)
+    domain = [['name', 'ilike', resolved_name], ['sale_ok', '=', True], ['active', '=', True]]
+    if brand == 'shahd':
+        domain.append(['categ_id.name', 'not ilike', 'مارلين'])
+    elif brand == 'marlin':
+        domain.append(['categ_id.name', 'not ilike', 'شهد'])
+        
+    products = rpc.search_read('product.product', domain, fields=['id', 'name', 'list_price', 'qty_available', 'categ_id'], limit=5)
 
     if products:
         best_fallback = None

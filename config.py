@@ -8,7 +8,9 @@ import os
 import sys
 
 # --- Required Environment Variables ---
-BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+DISCORD_BOT_TOKEN = os.environ.get("DISCORD_BOT_TOKEN", "")
+SHAHD_CHANNEL_ID = int(os.environ.get("SHAHD_CHANNEL_ID", "0"))
+MARLIN_CHANNEL_ID = int(os.environ.get("MARLIN_CHANNEL_ID", "0"))
 ODOO_URL = os.environ.get("ODOO_URL", "")
 ODOO_DB = os.environ.get("ODOO_DB", "")
 ODOO_USER = os.environ.get("ODOO_USER", "")
@@ -17,7 +19,7 @@ OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 
 # --- Validate on startup ---
 _REQUIRED = {
-    "TELEGRAM_BOT_TOKEN": BOT_TOKEN,
+    "DISCORD_BOT_TOKEN": DISCORD_BOT_TOKEN,
     "ODOO_URL": ODOO_URL,
     "ODOO_DB": ODOO_DB,
     "ODOO_USER": ODOO_USER,
