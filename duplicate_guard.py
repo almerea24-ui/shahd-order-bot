@@ -34,14 +34,14 @@ def _products_fingerprint(products: list) -> frozenset:
     return frozenset(items)
 
 
-def check_duplicate(parsed_order: dict) -> dict | None:
+def check_duplicate(parsed_order: dict) -> tuple[bool, str]:
     """
     Check if this order looks like a duplicate.
-    Returns None if OK, or a dict with duplicate info if likely duplicate.
+    Returns (True, warning_message) if duplicate, (False, '') if OK.
     """
     phone = parsed_order.get('phone', '').strip()
     if not phone or len(phone) < 8:
-        return None  # Can't check without phone
+        return False, ''  # Can't check without phone
 
     _cleanup_old(phone)
     new_products = _products_fingerprint(parsed_order.get('products', []))
@@ -53,14 +53,10 @@ def check_duplicate(parsed_order: dict) -> dict | None:
             overlap = len(new_products & old_products) / max(len(new_products), len(old_products))
             if overlap >= 0.7:  # 70%+ overlap
                 minutes_ago = int((now - timestamp) / 60)
-                return {
-                    'phone': phone,
-                    'minutes_ago': minutes_ago,
-                    'overlap_pct': int(overlap * 100),
-                    'old_key': old_key,
-                }
+                msg = f"طلب مكرر محتمل! نفس الرقم {phone} أرسل طلباً مشابهاً قبل {minutes_ago} دقيقة ({int(overlap * 100)}% تطابق)."
+                return True, msg
 
-    return None
+    return False, ''
 
 
 def register_order(parsed_order: dict, order_key: str):
