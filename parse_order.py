@@ -458,13 +458,28 @@ def _validate_and_fix(parsed: dict, original_text: str) -> dict:
 
 
 def parse_with_llm(message_text: str) -> dict:
-    """Use OpenAI GPT-4.1-mini to parse the order message."""
-    from openai import OpenAI
-    from config import OPENAI_API_KEY
-    client = OpenAI(
-        api_key=OPENAI_API_KEY,
-        base_url='https://api.openai.com/v1'
-    )
+    """Use LLM via OpenRouter to parse the order message."""
+    import requests as _requests
+    from config import OPENAI_API_KEY, OPENAI_BASE_URL, LLM_MODEL
+    
+    # Use a session with trust_env=False to bypass any proxy interference
+    _session = _requests.Session()
+    _session.trust_env = False
+    
+    def _call_llm(messages, temperature=0, max_tokens=1500):
+        r = _session.post(
+            f"{OPENAI_BASE_URL}/chat/completions",
+            headers={
+                "Authorization": f"Bearer {OPENAI_API_KEY}",
+                "Content-Type": "application/json",
+                "HTTP-Referer": "https://shahdbeauty.odoo.com",
+                "X-Title": "Shahd Odoo Bot"
+            },
+            json={"model": LLM_MODEL, "messages": messages, "temperature": temperature, "max_tokens": max_tokens},
+            timeout=30
+        )
+        r.raise_for_status()
+        return r.json()["choices"][0]["message"]["content"]
 
     system_prompt = """You are an order parser for an Iraqi beauty products business.
 Extract order details from WhatsApp messages in Arabic/Iraqi dialect.
@@ -575,17 +590,14 @@ PRICE SHORTHAND RULES:
 
     full_prompt = system_prompt + f"\n\nParse this order and return ONLY valid JSON (no markdown, no code blocks):\n\n{message_text}"
 
-    response = client.chat.completions.create(
-        model="gpt-4.1-mini",
+    raw = _call_llm(
         messages=[
             {"role": "system", "content": "You are an order parser. Return ONLY valid JSON, no markdown."},
             {"role": "user", "content": full_prompt}
         ],
         temperature=0,
-        response_format={"type": "json_object"}
-    )
-
-    raw = response.choices[0].message.content.strip()
+        max_tokens=1500
+    ).strip()
     # Remove markdown code blocks if present
     raw = re.sub(r'^```(?:json)?\s*', '', raw)
     raw = re.sub(r'\s*```$', '', raw)

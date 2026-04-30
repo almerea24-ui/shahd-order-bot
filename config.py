@@ -16,6 +16,7 @@ ODOO_DB = os.environ.get("ODOO_DB", "")
 ODOO_USER = os.environ.get("ODOO_USER", "")
 ODOO_PASSWORD = os.environ.get("ODOO_PASSWORD", "")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
+OPENAI_BASE_URL = os.environ.get("OPENAI_BASE_URL", "https://openrouter.ai/api/v1")
 
 # --- Validate on startup ---
 _REQUIRED = {
@@ -62,7 +63,7 @@ ODOO_RETRY_DELAY = 1  # seconds
 DUPLICATE_WINDOW_MINUTES = int(os.environ.get("DUPLICATE_WINDOW_MINUTES", "30"))
 
 # --- LLM ---
-LLM_MODEL = "gpt-4.1-mini"
+LLM_MODEL = os.environ.get("LLM_MODEL", "openai/gpt-4o-mini")
 
 # --- Carrier Map ---
 CARRIER_MAP = {
