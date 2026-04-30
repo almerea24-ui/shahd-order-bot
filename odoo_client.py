@@ -117,7 +117,7 @@ class OdooRPC:
     # ============ Cached Product Search ============
 
     def get_all_products(self, force=False):
-        """Return cached list of all saleable products."""
+        """Return cached list of all saleable products with category complete_name."""
         now = time.time()
         if not force and self._product_cache and (now - self._product_cache_time) < PRODUCT_CACHE_TTL:
             return self._product_cache
@@ -125,6 +125,24 @@ class OdooRPC:
         products = self.search_read('product.product', [
             ['sale_ok', '=', True], ['active', '=', True]
         ], fields=['id', 'name', 'list_price', 'qty_available', 'categ_id'], limit=500)
+
+        # Enrich products with category complete_name for brand filtering
+        categ_ids = list(set(p['categ_id'][0] for p in products if p.get('categ_id') and p['categ_id']))
+        categ_map = {}
+        if categ_ids:
+            try:
+                categories = self.call('product.category', 'read', [categ_ids], {'fields': ['id', 'complete_name']})
+                categ_map = {c['id']: c.get('complete_name', '') for c in categories}
+            except Exception as e:
+                logger.warning("Could not fetch category complete_names: %s", e)
+
+        for p in products:
+            if p.get('categ_id') and p['categ_id']:
+                categ_id = p['categ_id'][0]
+                p['categ_complete_name'] = categ_map.get(categ_id, p['categ_id'][1] if len(p['categ_id']) > 1 else '')
+            else:
+                p['categ_complete_name'] = ''
+
         self._product_cache = products
         self._product_cache_time = now
         logger.info("Product cache refreshed: %d products", len(products))
