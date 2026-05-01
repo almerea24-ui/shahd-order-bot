@@ -170,6 +170,7 @@ def find_product(rpc: OdooRPC, product_name: str, brand: str = None):
         resolved_name = resolve_product_name(product_name)
     
     logger.info(f"Product lookup: '{product_name}' -> resolved: '{resolved_name}' (brand: {brand})")
+    import sys; print(f"[BRAND_DEBUG] product='{product_name}' resolved='{resolved_name}' brand={brand}", flush=True, file=sys.stdout)
 
     # Get cached products
     all_products = rpc.get_all_products()
