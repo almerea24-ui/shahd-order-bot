@@ -200,15 +200,17 @@ def create_full_order(order_data, brand):
     order_name = order_info['name']
 
     if target_total > 0 and abs(current_total - target_total) > 1:
+        # discount_amount = current - target
+        # موجب → يُضاف خصم سالب (تخفيض)
+        # سالب → يُضاف تعديل موجب (تكملة، مثلاً عند وجود هدايا بسعر 0)
         discount_amount = current_total - target_total
-        if discount_amount > 0:
-            rpc.create('sale.order.line', {
-                'order_id': order_id,
-                'product_id': DISCOUNT_PRODUCT_ID,
-                'product_uom_qty': 1,
-                'price_unit': -discount_amount,
-                'name': 'Discount',
-            })
+        rpc.create('sale.order.line', {
+            'order_id': order_id,
+            'product_id': DISCOUNT_PRODUCT_ID,
+            'product_uom_qty': 1,
+            'price_unit': -discount_amount,
+            'name': 'Discount' if discount_amount > 0 else 'Price Adjustment',
+        })
 
         order_info = rpc.read('sale.order', order_id, fields=['amount_total', 'name'])[0]
         current_total = order_info['amount_total']
