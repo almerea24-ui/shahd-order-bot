@@ -96,7 +96,7 @@ NON_PRODUCT_PATTERNS = [
     r'الحساب\s*\d',         # price line
     r'السعر\s*\d',           # price line
     r'العنوان',           # address line
-    r'بغداد|\u0628صرة|نجف|كربلاء|موصل',  # cities
+    r'بغداد|بصرة|نجف|كربلاء|موصل|اربيل|أربيل|السليمانية|دهوك|كركوك|ميسان|بابل|واسط|ديالى|الانبار|الأنبار|صلاح الدين|القادسية|المثنى|ذي قار',  # Iraqi provinces
     r'طابق|بناية|عمارة|شارع|زقاق',  # address details
     r'رقم التلفون|رقم التليفون|هذا رقم',  # phone label
     r'الاسم\s*:|\u0627لاسم\s*:',    # name label
@@ -119,9 +119,11 @@ def _is_product_line(line: str) -> bool:
     # Remove هدية/هديه prefix for keyword check
     line_check = re.sub(r'^(\u0647\u062f\u064a\u0629|\u0647\u062f\u064a\u0647)\s*', '', line_clean).strip()
     
-    # Check if line contains any product keyword
+    # Check if line contains any product keyword (as whole word, not substring)
     for kw in PRODUCT_LINE_KEYWORDS:
-        if kw in line_check:
+        # Use word-boundary-like check: keyword must be preceded/followed by space or start/end
+        pattern = r'(?:^|\s)' + re.escape(kw) + r'(?:\s|$)'
+        if re.search(pattern, line_check):
             return True
     
     return False
@@ -139,9 +141,12 @@ def _extract_product_lines_from_text(text: str) -> list:
         if not _is_product_line(line):
             continue
         
-        is_gift = bool(re.match(r'^(\u0647\u062f\u064a\u0629|\u0647\u062f\u064a\u0647)\s+', line))
-        # Remove هدية/هديه prefix
+        # هدية/هديه can appear at start OR end of line
+        is_gift = bool(re.match(r'^(\u0647\u062f\u064a\u0629|\u0647\u062f\u064a\u0647)\s+', line)) or \
+                  bool(re.search(r'\s+(\u0647\u062f\u064a\u0629|\u0647\u062f\u064a\u0647)$', line))
+        # Remove هدية/هديه from start or end
         name = re.sub(r'^(\u0647\u062f\u064a\u0629|\u0647\u062f\u064a\u0647)\s+', '', line).strip()
+        name = re.sub(r'\s+(\u0647\u062f\u064a\u0629|\u0647\u062f\u064a\u0647)$', '', name).strip()
         
         # Extract quantity from line
         quantity = 1
