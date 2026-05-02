@@ -557,6 +557,13 @@ CRITICAL QUANTITY RULES:
 - DO NOT confuse the final price number with a product quantity
 - DO NOT carry over quantities from one product line to another
 
+CRITICAL PRODUCT NAME PRESERVATION:
+- The word "مني" or "ميني" at the END of a product name is PART OF THE PRODUCT NAME (it means "mini size"). NEVER remove it.
+- "صابونة الكركم مني" → name="صابونة الكركم مني" (NOT "صابونة الكركم")
+- "مقشر نيلة مني" → name="مقشر نيلة مني" (NOT "مقشر نيلة")
+- "صابونه كركم مني" → name="صابونه كركم مني" (keep as-is)
+- Keep ALL words in the product name exactly as written
+
 GIFT PRODUCT NAME RULES:
 - When a line starts with "هدية" or "هديه", set is_gift=true and REMOVE the word "هدية"/"هديه" from the product name
 - Example: "هدية مسك قريشي" → name="مسك قريشي", is_gift=true
