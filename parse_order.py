@@ -145,9 +145,14 @@ def _extract_product_lines_from_text(text: str) -> list:
         
         # Extract quantity from line
         quantity = 1
+        # Check for عدد2 / عدد 2 pattern (Iraqi dialect for quantity)
+        adad_match = re.search(r'\s*عدد\s*(\d{1,2})$', name)
+        if adad_match:
+            quantity = int(adad_match.group(1))
+            name = name[:adad_match.start()].strip()
         # Check for x2/X3 pattern
-        x_match = re.search(r'[xX×]\s*(\d{1,2})$', name)
-        if x_match:
+        elif re.search(r'[xX×]\s*(\d{1,2})$', name):
+            x_match = re.search(r'[xX×]\s*(\d{1,2})$', name)
             quantity = int(x_match.group(1))
             name = name[:x_match.start()].strip()
         else:
@@ -553,6 +558,9 @@ CRITICAL QUANTITY RULES:
   * "عسل عام ثنتين" → name="عسل عام", quantity=2
   * "بكج الكافيار x2" → name="بكج الكافيار", quantity=2
   * "عطر فانيلا X3" → name="عطر فانيلا", quantity=3
+  * "شامبو جوز الهند عدد2" → name="شامبو جوز الهند", quantity=2
+  * "زيت الكافيار عدد 3" → name="زيت الكافيار", quantity=3
+- The word "عدد" followed by a number means quantity (Iraqi dialect). REMOVE "عدد" and the number from the product name.
 - If no quantity is specified on a line, default to 1
 - DO NOT confuse the final price number with a product quantity
 - DO NOT carry over quantities from one product line to another
