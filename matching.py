@@ -148,25 +148,29 @@ def find_product(rpc: OdooRPC, product_name: str, brand: str = None):
     """Find product using cached catalog + fuzzy matching."""
     # Check brand-specific aliases first (highest priority)
     resolved_name = product_name.strip()
+    brand_alias_applied = False
     if brand and brand in BRAND_ALIASES:
         brand_alias_map = BRAND_ALIASES[brand]
         name_lower = resolved_name.lower()
         # Exact match
         if resolved_name in brand_alias_map:
             resolved_name = brand_alias_map[resolved_name]
+            brand_alias_applied = True
         # Case-insensitive
         elif name_lower in {k.lower(): v for k, v in brand_alias_map.items()}:
             resolved_name = {k.lower(): v for k, v in brand_alias_map.items()}[name_lower]
+            brand_alias_applied = True
         # Normalized Arabic
         else:
             name_norm = normalize_arabic(resolved_name)
             for alias, real in brand_alias_map.items():
                 if normalize_arabic(alias) == name_norm:
                     resolved_name = real
+                    brand_alias_applied = True
                     break
     
     # Fall back to general aliases if no brand-specific match
-    if resolved_name == product_name.strip():
+    if not brand_alias_applied:
         resolved_name = resolve_product_name(product_name)
     
     logger.info(f"Product lookup: '{product_name}' -> resolved: '{resolved_name}' (brand: {brand})")
@@ -232,20 +236,34 @@ def find_product(rpc: OdooRPC, product_name: str, brand: str = None):
                 return scored[0][0]
         return None
 
-    # 1. Search in brand-specific products first (highest priority)
+    # 1. If brand alias was applied, search in all filtered products (shahd+neutral or marlin+neutral)
+    #    with exact/normalized match first — this ensures neutral products are found correctly
+    if brand_alias_applied:
+        # Try exact match in all filtered products first
+        for p in all_products:
+            if p['name'].strip() == resolved_name:
+                logger.info(f"Brand-alias exact match: '{p['name']}'")
+                return p
+        name_norm_check = normalize_arabic(resolved_name)
+        for p in all_products:
+            if normalize_arabic(p['name']) == name_norm_check:
+                logger.info(f"Brand-alias normalized match: '{p['name']}'")
+                return p
+
+    # 2. Search in brand-specific products first (highest priority)
     if brand and brand_specific:
         result = search_in(brand_specific, resolved_name)
         if result:
-            logger.info(f"Brand-specific match: '{result['name']}'")
+            logger.info(f"Brand-specific match: '{result['name']}'"
+)
             return result
 
-    # 2. Search in all filtered products
+    # 3. Search in all filtered products
     result = search_in(all_products, resolved_name)
     if result:
-        logger.info(f"Filtered match: '{result['name']}'")
-        return result
-
-    # 4. Keyword overlap (for long product names)
+        logger.info(f"Filtered match: '{result['name']}'"
+)
+        return result    # 4. Keyword overlap (for long product names)
     resolved_words = set(normalize_arabic(w) for w in resolved_name.split() if len(w) > 1)
     generic_words = {'بكج', 'كريم', 'عطر', 'زيت', 'سيروم', 'غسول', 'مقشر',
                      'لوشن', 'شامبو', 'ماسك', 'مربي', 'عسل', 'كورس', 'صابونه',
