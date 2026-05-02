@@ -325,6 +325,15 @@ def _fix_quantities(parsed: dict, original_text: str) -> dict:
                 break
         
         if not found_qty:
+            # Check for عدد2 / عدد 2 pattern (Iraqi dialect)
+            adad_match = re.search(r'عدد\s*(\d{1,2})', remaining)
+            if adad_match:
+                num = int(adad_match.group(1))
+                if 1 <= num <= 20:
+                    product['quantity'] = num
+                    found_qty = True
+        
+        if not found_qty:
             # Check for x2/X3 pattern (e.g., "بكج الكافيار x2")
             x_match = re.search(r'[xX×]\s*(\d{1,2})', remaining)
             if x_match:
