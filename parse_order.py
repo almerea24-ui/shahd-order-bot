@@ -551,7 +551,7 @@ EXAMPLES:
 IMPORTANT: The word RIGHT AFTER the province name is usually the city/area. NEVER set city to "غير محدد" - always extract it from the address text. The first area/place name after the province IS the city.
 
 OTHER RULES:
-- Prices are written as FULL numbers in Iraqi Dinars (e.g., 50000 means 50,000 IQD, 35000 means 35,000 IQD, 120000 means 120,000 IQD)
+- Prices can be short (e.g., 26, 50, 75) or full (e.g., 26000, 50000, 75000) - return the EXACT number as written
 - NEVER divide or multiply the price - use the exact number written
 - If price says "واصل" or "واصله" or "واصلة", set total_price to 0 (means delivery included, use product prices as-is)
 - Products marked as هدية/هديه must have is_gift=true
@@ -611,10 +611,10 @@ DO NOT put a product name in customer_name field!
 - ALWAYS count the products: if the order has N product lines, the products array MUST have N items
 
 PRICE SHORTHAND RULES:
-- Prices can be written as short numbers: 75 means 75,000 IQD, 50 means 50,000 IQD, 45 means 45,000 IQD
-- If the price is a small number (less than 1000), multiply by 1000 to get the real price
-- Examples: "سعر 75" → total_price=75000, "الحساب 50" → total_price=50000, "128" → total_price=128000
-- If price is already large (e.g., 75000, 50000), use as-is
+- Prices are written as short numbers: 75 means 75,000 IQD, 50 means 50,000 IQD, 26 means 26,000 IQD
+- ALWAYS return the price EXACTLY as written in the message (do NOT multiply or convert)
+- Examples: "سعر 75" → total_price=75, "الحساب 50" → total_price=50, "السعر 26" → total_price=26
+- If price is already large (e.g., 75000, 50000), return as-is
 - The word "سعر" or "الحساب" or "السعر" before a number means it's the price"""
 
     full_prompt = system_prompt + f"\n\nParse this order and return ONLY valid JSON (no markdown, no code blocks):\n\n{message_text}"
