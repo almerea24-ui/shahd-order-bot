@@ -178,7 +178,7 @@ def create_full_order(order_data, brand):
         rpc.write('sale.order', order_id, {'carrier_id': carrier['carrier_id']})
         rpc.create('sale.order.line', {
             'order_id': order_id, 'product_id': carrier['product_id'],
-            'product_uom_qty': 1, 'price_unit': 5000,
+            'product_uom_qty': 1, 'price_unit': 4000,
             'name': carrier['name'], 'is_delivery': True,
         })
 
@@ -188,8 +188,12 @@ def create_full_order(order_data, brand):
     if delivery_lines:
         delivery_fee = delivery_lines[0]['price_unit']
         if delivery_fee <= 1:
-            delivery_fee = 5000
-            rpc.write('sale.order.line', delivery_lines[0]['id'], {'price_unit': 5000})
+            delivery_fee = 4000
+            rpc.write('sale.order.line', delivery_lines[0]['id'], {'price_unit': 4000})
+        elif delivery_fee != 4000:
+            # فرض سعر التوصيل 4000 بغض النظر عن سعر الناقل في Odoo
+            delivery_fee = 4000
+            rpc.write('sale.order.line', delivery_lines[0]['id'], {'price_unit': 4000})
 
     # 5. Adjust price with Discount line
     raw_total = order_data.get("total_price", 0)
