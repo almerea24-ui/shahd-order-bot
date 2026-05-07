@@ -1,14 +1,19 @@
 #!/usr/bin/env python3
 """
-Shahd Beauty / Marlen Discord Order Bot v3.
-Supports: order entry, reports, stock check, search, duplicate detection, user access control.
-Brand-aware: uses Discord channels to separate Shahd and Marlin orders.
+Shahd Beauty / Marlen Discord Order Bot v4.
+Improvements:
+  1. Catalog-first product extraction (rpc passed to parse_with_llm)
+  2. City disambiguation: asks employee when city not found in Odoo
+  3. Duplicate detection backed by Odoo (real orders, not in-memory only)
+  4. Request queue — serializes concurrent orders per channel
+  5. Pro-rata discount distribution on products (no phantom Discount line)
 """
 
 import time
 import logging
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
+from collections import defaultdict
 
 import discord
 from discord.ext import commands
@@ -35,19 +40,129 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# ============ Improvement 4: Per-channel request queue ============
+# Ensures orders in the same channel are processed one at a time
+_channel_queues: dict[int, asyncio.Queue] = {}
+_channel_workers: dict[int, asyncio.Task] = {}
+
+
+async def _get_channel_queue(channel_id: int) -> asyncio.Queue:
+    if channel_id not in _channel_queues:
+        _channel_queues[channel_id] = asyncio.Queue()
+    return _channel_queues[channel_id]
+
+
+async def _channel_worker(channel_id: int):
+    """Worker that processes orders for a channel one at a time."""
+    queue = _channel_queues[channel_id]
+    while True:
+        coro = await queue.get()
+        try:
+            await coro
+        except Exception as e:
+            logger.error(f"Channel worker error (channel={channel_id}): {e}", exc_info=True)
+        finally:
+            queue.task_done()
+
+
+async def enqueue_order(channel_id: int, coro):
+    """Enqueue an order processing coroutine for a channel."""
+    queue = await _get_channel_queue(channel_id)
+    if channel_id not in _channel_workers or _channel_workers[channel_id].done():
+        _channel_workers[channel_id] = asyncio.create_task(_channel_worker(channel_id))
+    position = queue.qsize() + 1
+    await queue.put(coro)
+    return position
+
+
 # ============ Access Control ============
 
 def is_authorized(user_id: int) -> bool:
-    """Check if user is authorized to use the bot."""
     if not AUTHORIZED_USERS:
-        return True  # No whitelist = open access
+        return True
     return user_id in AUTHORIZED_USERS
 
+
 def is_admin(user_id: int) -> bool:
-    """Check if user has admin access."""
     if not ADMIN_USERS:
-        return is_authorized(user_id)  # No admin list = all authorized are admins
+        return is_authorized(user_id)
     return user_id in ADMIN_USERS
+
+
+# ============ Improvement 3: Odoo-backed duplicate detection ============
+
+def check_duplicate_odoo(rpc: OdooRPC, phone: str, window_minutes: int = 30) -> tuple[bool, str]:
+    """
+    Check if a recent order exists in Odoo for this phone number.
+    More reliable than in-memory check — survives bot restarts.
+    """
+    if not phone or len(phone) < 8:
+        return False, ''
+    try:
+        cutoff = (datetime.utcnow() - timedelta(minutes=window_minutes)).strftime('%Y-%m-%d %H:%M:%S')
+        orders = rpc.search_read('sale.order', [
+            ['partner_id.phone', '=', phone],
+            ['date_order', '>=', cutoff],
+            ['state', 'in', ['sale', 'done', 'draft']],
+        ], fields=['name', 'date_order', 'amount_total'], limit=3)
+        if orders:
+            latest = orders[0]
+            order_time = latest.get('date_order', '')
+            msg = f"⚠️ يوجد طلب حديث لنفس الرقم {phone}: {latest['name']} ({order_time[:16]})"
+            return True, msg
+    except Exception as e:
+        logger.warning(f"Odoo duplicate check failed: {e}")
+    return False, ''
+
+
+# ============ Improvement 5: Pro-rata discount distribution ============
+
+def _distribute_discount(products_total: float, target_total: float, delivery_fee: float,
+                         matched_products: list, order_id: int, rpc: OdooRPC,
+                         product_line_ids: list) -> float:
+    """
+    Distribute the difference between products_total+delivery and target_total
+    proportionally across non-gift product lines.
+    Returns the actual final total.
+    """
+    current_total = products_total + delivery_fee
+    if target_total <= 0 or abs(current_total - target_total) <= 1:
+        return current_total
+
+    diff = target_total - current_total  # positive = need to add, negative = need to subtract
+
+    # Get non-gift product lines to distribute on
+    distributable = [(lid, price) for lid, price, is_gift in product_line_ids if not is_gift and price > 0]
+
+    if not distributable:
+        # No distributable products — fall back to single adjustment line
+        rpc.create('sale.order.line', {
+            'order_id': order_id,
+            'product_id': DISCOUNT_PRODUCT_ID,
+            'product_uom_qty': 1,
+            'price_unit': diff,
+            'name': 'Price Adjustment' if diff > 0 else 'Discount',
+        })
+        return target_total
+
+    # Distribute proportionally
+    total_distributable = sum(price for _, price in distributable)
+    remaining_diff = diff
+    for i, (line_id, price) in enumerate(distributable):
+        if i == len(distributable) - 1:
+            # Last line gets the remainder to avoid rounding errors
+            adjustment = remaining_diff
+        else:
+            adjustment = round(diff * (price / total_distributable))
+            remaining_diff -= adjustment
+
+        new_price = price + adjustment
+        if new_price < 0:
+            new_price = 0
+        rpc.write('sale.order.line', line_id, {'price_unit': new_price})
+
+    return target_total
+
 
 # ============ Odoo Order Functions ============
 
@@ -81,7 +196,6 @@ def create_full_order(order_data, brand):
             customer_vals['x_studio_city'] = city['id']
             city_matched = True
         else:
-            # Fallback: try each word/phrase from street
             if street:
                 street_words = street.split()
                 for i in range(len(street_words)):
@@ -96,7 +210,6 @@ def create_full_order(order_data, brand):
                     if city_matched:
                         break
 
-            # Try combining city + first word of street
             if not city_matched and street:
                 combined = f"{city_name} {street.split()[0]}"
                 city_result = find_city(rpc, combined, state_id)
@@ -139,12 +252,15 @@ def create_full_order(order_data, brand):
     matched_products = []
     products_total = 0
     low_stock = []
+    product_line_ids = []  # (line_id, price_unit, is_gift) for pro-rata
 
     for item in products_data:
-        product = find_product(rpc, item["name"], brand=brand)
+        # Improvement 1: use pre-resolved catalog product if available
+        product = item.get('_odoo_product') or find_product(rpc, item["name"], brand=brand)
         if product:
             qty = item.get('quantity', 1)
             is_gift = item.get('is_gift', False)
+            unit_price = product['list_price']
             line_vals = {
                 'order_id': order_id,
                 'product_id': product['id'],
@@ -153,22 +269,24 @@ def create_full_order(order_data, brand):
             if is_gift:
                 line_vals['price_unit'] = 0
                 line_vals['name'] = f"{product['name']} (هدية)"
-            rpc.create('sale.order.line', line_vals)
+                unit_price = 0
 
-            price = 0 if is_gift else product['list_price'] * qty
-            products_total += price
+            line_id = rpc.create('sale.order.line', line_vals)
+            line_price = unit_price * qty
+            products_total += line_price
+            product_line_ids.append((line_id, unit_price * qty, is_gift))
+
             gift_label = " (هدية)" if is_gift else ""
             matched_products.append(f"{product['name']} x{qty}{gift_label}")
 
-            # Check stock
             stock = product.get('qty_available', None)
             if stock is not None and stock < qty:
                 low_stock.append(f"{product['name']} (متوفر: {int(stock)}, مطلوب: {qty})")
         else:
             unmatched.append(item["name"])
 
-    # 4. Add delivery
-    delivery_fee = 0
+    # 4. Add delivery — force 4000 IQD
+    delivery_fee = 4000
     try:
         wiz_id = rpc.create('choose.delivery.carrier', {
             'order_id': order_id, 'carrier_id': carrier['carrier_id'],
@@ -186,37 +304,37 @@ def create_full_order(order_data, brand):
         ['order_id', '=', order_id], ['is_delivery', '=', True]
     ], fields=['id', 'price_unit'])
     if delivery_lines:
-        delivery_fee = delivery_lines[0]['price_unit']
-        if delivery_fee <= 1:
-            delivery_fee = 4000
-            rpc.write('sale.order.line', delivery_lines[0]['id'], {'price_unit': 4000})
-        elif delivery_fee != 4000:
-            # فرض سعر التوصيل 4000 بغض النظر عن سعر الناقل في Odoo
-            delivery_fee = 4000
+        if delivery_lines[0]['price_unit'] != 4000:
             rpc.write('sale.order.line', delivery_lines[0]['id'], {'price_unit': 4000})
 
-    # 5. Adjust price with Discount line
+    # 5. Improvement 5: Pro-rata discount distribution
     raw_total = order_data.get("total_price", 0)
     target_total = int(raw_total) if raw_total else 0
 
+    if target_total > 0 and abs((products_total + delivery_fee) - target_total) > 1:
+        final_total = _distribute_discount(
+            products_total, target_total, delivery_fee,
+            matched_products, order_id, rpc, product_line_ids
+        )
+    else:
+        final_total = products_total + delivery_fee
+
+    # Verify final total from Odoo
     order_info = rpc.read('sale.order', order_id, fields=['amount_total', 'name'])[0]
     current_total = order_info['amount_total']
     order_name = order_info['name']
 
+    # If still off (edge case), add a single adjustment line
     if target_total > 0 and abs(current_total - target_total) > 1:
-        # discount_amount = current - target
-        # موجب → يُضاف خصم سالب (تخفيض)
-        # سالب → يُضاف تعديل موجب (تكملة، مثلاً عند وجود هدايا بسعر 0)
-        discount_amount = current_total - target_total
+        diff = target_total - current_total
         rpc.create('sale.order.line', {
             'order_id': order_id,
             'product_id': DISCOUNT_PRODUCT_ID,
             'product_uom_qty': 1,
-            'price_unit': -discount_amount,
-            'name': 'Discount' if discount_amount > 0 else 'Price Adjustment',
+            'price_unit': diff,
+            'name': 'Price Adjustment' if diff > 0 else 'Discount',
         })
-
-        order_info = rpc.read('sale.order', order_id, fields=['amount_total', 'name'])[0]
+        order_info = rpc.read('sale.order', order_id, fields=['amount_total'])[0]
         current_total = order_info['amount_total']
 
     # 6. Confirm order
@@ -241,6 +359,58 @@ def create_full_order(order_data, brand):
         "low_stock": low_stock,
     }
 
+
+# ============ Improvement 2: City disambiguation view ============
+
+class CitySelectView(discord.ui.View):
+    """Shown when city is not found — lets employee pick from Odoo cities or confirm free text."""
+
+    def __init__(self, parsed_data, brand, order_key, state_id, city_candidates):
+        super().__init__(timeout=120)
+        self.parsed_data = parsed_data
+        self.brand = brand
+        self.order_key = order_key
+        self.state_id = state_id
+        self.chosen_city = None
+
+        # Add select menu with up to 25 candidates
+        options = []
+        for c in city_candidates[:24]:
+            options.append(discord.SelectOption(label=c['x_name'][:100], value=str(c['id'])))
+        options.append(discord.SelectOption(label="⬅️ استخدم النص كما هو", value="free_text"))
+
+        select = discord.ui.Select(
+            placeholder="اختر المنطقة الصحيحة...",
+            options=options,
+            custom_id="city_select"
+        )
+        select.callback = self._on_select
+        self.add_item(select)
+
+    async def _on_select(self, interaction: discord.Interaction):
+        value = interaction.data['values'][0]
+        if value == "free_text":
+            # Keep city as free text
+            pass
+        else:
+            city_id = int(value)
+            # Find city name
+            rpc = OdooRPC()
+            cities = rpc.search_read('x_city', [['id', '=', city_id]], fields=['id', 'x_name'])
+            if cities:
+                self.parsed_data['_city_id'] = city_id
+                self.parsed_data['_city_name'] = cities[0]['x_name']
+
+        await interaction.response.edit_message(content="⏳ جاري إدخال الطلب...", view=None)
+        try:
+            result = await asyncio.to_thread(create_full_order, self.parsed_data, self.brand)
+            register_order(self.parsed_data, self.order_key)
+            await _send_order_result(interaction.message, result)
+        except Exception as e:
+            logger.error(f"Order error after city select: {e}", exc_info=True)
+            await interaction.message.edit(content=f"❌ خطأ: {e}")
+
+
 # ============ Discord Bot Setup ============
 
 class OrderConfirmView(discord.ui.View):
@@ -253,47 +423,11 @@ class OrderConfirmView(discord.ui.View):
     @discord.ui.button(label="تأكيد وإدخال ✅", style=discord.ButtonStyle.success, custom_id="confirm_order")
     async def confirm_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(content="⏳ جاري إدخال الطلب في أودو...", view=None)
-        
+
         try:
             result = await asyncio.to_thread(create_full_order, self.parsed_data, self.brand)
             register_order(self.parsed_data, self.order_key)
-
-            products_list = "\n".join([f"  - {p}" for p in result['products']])
-            unmatched_text = ""
-            if result['unmatched']:
-                unmatched_text = f"\n\n⚠️ منتجات غير موجودة: {', '.join(result['unmatched'])}"
-
-            if result['target'] == 0:
-                total_match = "✅"
-            else:
-                total_match = "✅" if abs(result['total'] - result['target']) < 100 else f"⚠️ (المطلوب: {result['target']:,.0f})"
-
-            warnings = ""
-            if not result.get('province_matched'):
-                warnings += "\n⚠️ المحافظة لم يتم ربطها بالنظام"
-            if not result.get('city_matched'):
-                warnings += "\n⚠️ المنطقة لم يتم ربطها بالنظام"
-
-            low_stock_text = ""
-            if result.get('low_stock'):
-                low_stock_text = "\n\n📦 تحذير مخزون منخفض:\n"
-                for item in result['low_stock']:
-                    low_stock_text += f"  ⚠️ {item}\n"
-
-            response = (
-                f"تم إدخال الطلب بنجاح! ✅\n\n"
-                f"رقم الطلب: {result['order_name']}\n"
-                f"العميل: {result['customer_name']}\n"
-                f"المحافظة: {result.get('province', '?')}\n"
-                f"المنطقة: {result.get('city', '?')}\n"
-                f"المنتجات:\n{products_list}\n"
-                f"التوصيل: {result['delivery_fee']:,.0f} د.ع ({result['carrier']})\n"
-                f"الإجمالي: {result['total']:,.0f} د.ع {total_match}"
-                f"{unmatched_text}{warnings}{low_stock_text}\n\n"
-                f"🔗 {result['url']}"
-            )
-            await interaction.message.edit(content=response)
-
+            await _send_order_result(interaction.message, result)
         except Exception as e:
             logger.error(f"Error creating order: {e}", exc_info=True)
             await interaction.message.edit(content=f"❌ خطأ بإدخال الطلب:\n{e}\n\nحاول مرة ثانية.")
@@ -301,6 +435,45 @@ class OrderConfirmView(discord.ui.View):
     @discord.ui.button(label="إلغاء ❌", style=discord.ButtonStyle.danger, custom_id="cancel_order")
     async def cancel_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(content="تم إلغاء الطلب. ❌", view=None)
+
+
+async def _send_order_result(message: discord.Message, result: dict):
+    """Format and send the order result message."""
+    products_list = "\n".join([f"  - {p}" for p in result['products']])
+    unmatched_text = ""
+    if result['unmatched']:
+        unmatched_text = f"\n\n⚠️ منتجات غير موجودة: {', '.join(result['unmatched'])}"
+
+    if result['target'] == 0:
+        total_match = "✅"
+    else:
+        total_match = "✅" if abs(result['total'] - result['target']) < 100 else f"⚠️ (المطلوب: {result['target']:,.0f})"
+
+    warnings = ""
+    if not result.get('province_matched'):
+        warnings += "\n⚠️ المحافظة لم يتم ربطها بالنظام"
+    if not result.get('city_matched'):
+        warnings += "\n⚠️ المنطقة لم يتم ربطها بالنظام"
+
+    low_stock_text = ""
+    if result.get('low_stock'):
+        low_stock_text = "\n\n📦 تحذير مخزون منخفض:\n"
+        for item in result['low_stock']:
+            low_stock_text += f"  ⚠️ {item}\n"
+
+    response = (
+        f"تم إدخال الطلب بنجاح! ✅\n\n"
+        f"رقم الطلب: {result['order_name']}\n"
+        f"العميل: {result['customer_name']}\n"
+        f"المحافظة: {result.get('province', '?')}\n"
+        f"المنطقة: {result.get('city', '?')}\n"
+        f"المنتجات:\n{products_list}\n"
+        f"التوصيل: {result['delivery_fee']:,.0f} د.ع ({result['carrier']})\n"
+        f"الإجمالي: {result['total']:,.0f} د.ع {total_match}"
+        f"{unmatched_text}{warnings}{low_stock_text}\n\n"
+        f"🔗 {result['url']}"
+    )
+    await message.edit(content=response)
 
 
 class OrderBot(commands.Bot):
@@ -313,48 +486,24 @@ class OrderBot(commands.Bot):
         await self.tree.sync()
         logger.info("Discord bot setup complete and slash commands synced.")
 
+
 bot = OrderBot()
+
 
 @bot.event
 async def on_ready():
     logger.info(f"Logged in as {bot.user} (ID: {bot.user.id})")
-    print(f"Discord Bot v3 is running... 🚀")
+    print(f"Discord Bot v4 is running... 🚀")
 
-@bot.event
-async def on_message(message: discord.Message):
-    if message.author.bot:
-        return
 
-    # Check authorization
-    if not is_authorized(message.author.id):
-        return
-
-    # Process commands if any
-    await bot.process_commands(message)
-
-    # If it's a command, don't process as order
-    if message.content.startswith("!") or message.content.startswith("/"):
-        return
-
-    # Determine brand based on channel
-    brand = None
-    if message.channel.id == SHAHD_CHANNEL_ID:
-        brand = "shahd"
-    elif message.channel.id == MARLIN_CHANNEL_ID:
-        brand = "marlin"
-    
-    if not brand:
-        # Not in a designated order channel
-        return
-
-    text = message.content.strip()
-    if len(text) < 15:
-        return
-
+async def _process_order_message(message: discord.Message, brand: str, text: str):
+    """Core order processing logic — runs inside the channel queue."""
     status_msg = await message.channel.send("⏳ جاري تحليل الطلب...")
 
+    # Improvement 1: pass rpc and brand to parse_with_llm for catalog-first extraction
     try:
-        parsed = await asyncio.to_thread(parse_with_llm, text)
+        rpc = OdooRPC()
+        parsed = await asyncio.to_thread(parse_with_llm, text, rpc, brand)
     except Exception as e:
         logger.error(f"LLM Parse Error: {e}")
         await status_msg.edit(content="❌ حدث خطأ أثناء تحليل الطلب. تأكد من صيغة الرسالة.")
@@ -364,14 +513,19 @@ async def on_message(message: discord.Message):
         await status_msg.edit(content="❌ لم يتم العثور على منتجات في الرسالة.")
         return
 
-    # Check duplicates
-    is_dup, dup_msg = check_duplicate(parsed)
-    dup_warning = f"\n\n⚠️ **تحذير:** {dup_msg}" if is_dup else ""
+    # Improvement 3: Odoo-backed duplicate check
+    phone = parsed.get('phone', '')
+    is_dup_odoo, dup_msg_odoo = check_duplicate_odoo(rpc, phone)
+    is_dup_mem, dup_msg_mem = check_duplicate(parsed)
+    is_dup = is_dup_odoo or is_dup_mem
+    dup_warning = ""
+    if is_dup:
+        dup_warning = f"\n\n⚠️ **تحذير:** {dup_msg_odoo or dup_msg_mem}"
 
     # Format summary
     summary = f"العميل: {parsed.get('customer_name', 'غير محدد')}\n"
     summary += f"الهاتف: {parsed.get('phone', 'غير محدد')}\n"
-    
+
     province_warning = ""
     if not parsed.get("province"):
         province_warning = "⚠️ **المحافظة مفقودة!**\n"
@@ -407,11 +561,66 @@ async def on_message(message: discord.Message):
         await status_msg.edit(content=f"📋 بيانات الطلب:\n\n{summary}")
         return
 
+    # Improvement 2: City disambiguation
+    state_id = PROVINCE_MAP.get(parsed.get('province', ''), False)
+    city_name = parsed.get('city', '')
+    city_candidates = []
+    if state_id and city_name:
+        city_found = await asyncio.to_thread(find_city, rpc, city_name, state_id)
+        if not city_found:
+            # Try to get candidate cities from Odoo for this state
+            try:
+                all_cities = await asyncio.to_thread(rpc.get_cities_for_state, state_id)
+                city_candidates = all_cities[:25]
+            except Exception:
+                pass
+
     brand_name = "شهد بيوتي" if brand == "shahd" else "مارلين"
     summary += f"\nالبراند: {brand_name}{dup_warning}"
 
-    view = OrderConfirmView(parsed, brand, order_key)
-    await status_msg.edit(content=f"📋 بيانات الطلب:\n\n{summary}", view=view)
+    if city_candidates and city_name:
+        # Show city selection
+        summary += f"\n\n⚠️ المنطقة '{city_name}' غير موجودة في النظام. اختر المنطقة الصحيحة:"
+        view = CitySelectView(parsed, brand, order_key, state_id, city_candidates)
+        await status_msg.edit(content=f"📋 بيانات الطلب:\n\n{summary}", view=view)
+    else:
+        view = OrderConfirmView(parsed, brand, order_key)
+        await status_msg.edit(content=f"📋 بيانات الطلب:\n\n{summary}", view=view)
+
+
+@bot.event
+async def on_message(message: discord.Message):
+    if message.author.bot:
+        return
+
+    if not is_authorized(message.author.id):
+        return
+
+    await bot.process_commands(message)
+
+    if message.content.startswith("!") or message.content.startswith("/"):
+        return
+
+    brand = None
+    if message.channel.id == SHAHD_CHANNEL_ID:
+        brand = "shahd"
+    elif message.channel.id == MARLIN_CHANNEL_ID:
+        brand = "marlin"
+
+    if not brand:
+        return
+
+    text = message.content.strip()
+    if len(text) < 15:
+        return
+
+    # Improvement 4: Enqueue order processing
+    queue_pos = await enqueue_order(
+        message.channel.id,
+        _process_order_message(message, brand, text)
+    )
+    if queue_pos > 1:
+        await message.channel.send(f"⏳ طلبك في الطابور (رقم {queue_pos}). انتظر قليلاً...")
 
 
 # ============ Slash Commands ============
@@ -429,8 +638,7 @@ async def report_cmd(interaction: discord.Interaction, period: str = "today"):
             report_text = await asyncio.to_thread(generate_weekly_report)
         else:
             report_text = await asyncio.to_thread(generate_daily_report)
-        
-        # Discord message limit is 2000 chars, split if necessary
+
         if len(report_text) > 1900:
             parts = [report_text[i:i+1900] for i in range(0, len(report_text), 1900)]
             await interaction.followup.send(f"📊 تقرير المبيعات:\n\n{parts[0]}")
@@ -441,6 +649,7 @@ async def report_cmd(interaction: discord.Interaction, period: str = "today"):
     except Exception as e:
         logger.error(f"Report error: {e}")
         await interaction.followup.send("❌ حدث خطأ أثناء توليد التقرير.")
+
 
 @bot.tree.command(name="stock", description="فحص مخزون منتج")
 @app_commands.describe(product_name="اسم المنتج")
@@ -453,7 +662,7 @@ async def stock_cmd(interaction: discord.Interaction, product_name: str):
     try:
         rpc = OdooRPC()
         results = await asyncio.to_thread(rpc.check_stock, product_name)
-        
+
         if not results:
             await interaction.followup.send(f"❌ ما لقيت منتج بهذا الاسم: {product_name}")
             return
@@ -470,6 +679,7 @@ async def stock_cmd(interaction: discord.Interaction, product_name: str):
         logger.error(f"Stock error: {e}")
         await interaction.followup.send("❌ حدث خطأ أثناء فحص المخزون.")
 
+
 @bot.tree.command(name="search", description="البحث عن طلب أو زبون")
 @app_commands.describe(query="رقم الهاتف، اسم الزبون، أو رقم الطلب")
 async def search_cmd(interaction: discord.Interaction, query: str):
@@ -482,9 +692,9 @@ async def search_cmd(interaction: discord.Interaction, query: str):
         rpc = OdooRPC()
         orders = await asyncio.to_thread(rpc.search_orders, query)
         customers = await asyncio.to_thread(rpc.search_customers, query)
-        
+
         result_text = format_search_results(orders, customers)
-        
+
         if len(result_text) > 1900:
             parts = [result_text[i:i+1900] for i in range(0, len(result_text), 1900)]
             await interaction.followup.send(parts[0])
@@ -496,11 +706,13 @@ async def search_cmd(interaction: discord.Interaction, query: str):
         logger.error(f"Search error: {e}")
         await interaction.followup.send("❌ حدث خطأ أثناء البحث.")
 
+
 def main():
     if not DISCORD_BOT_TOKEN:
-        print("❌ DISCORD_BOT_TOKEN is missing in config.")
+        print("❌ DISCORD_BOT_TOKEN not set.")
         return
     bot.run(DISCORD_BOT_TOKEN)
+
 
 if __name__ == "__main__":
     main()
