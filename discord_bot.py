@@ -248,12 +248,30 @@ def create_full_order(order_data, brand):
 
     # 3. Add products
     products_data = order_data.get("products", [])
+    # حماية ثانية: تحقق من وجود جميع المنتجات قبل إنشاء أي سطر في Odoo
+    missing_products = []
+    for item in products_data:
+        if item.get('is_gift'):
+            continue
+        if not item.get('_odoo_product'):
+            p = find_product(rpc, item["name"], brand=brand)
+            if p:
+                item['_odoo_product'] = p
+            else:
+                missing_products.append(item["name"])
+    if missing_products:
+        # حذف الطلب الذي تم إنشاؤه للتو وإلغاؤه
+        try:
+            rpc.call('sale.order', 'action_cancel', [[order_id]])
+            rpc.unlink('sale.order', order_id)
+        except Exception:
+            pass
+        raise ValueError(f"⛔ منتجات غير موجودة في النظام:\n" + "\n".join([f"  ❌ {n}" for n in missing_products]) + "\n\nيرجى تصحيح الطلب وإعادة إرساله.")
     unmatched = []
     matched_products = []
     products_total = 0
     low_stock = []
     product_line_ids = []  # (line_id, price_unit, is_gift) for pro-rata
-
     for item in products_data:
         # Improvement 1: use pre-resolved catalog product if available
         product = item.get('_odoo_product') or find_product(rpc, item["name"], brand=brand)
@@ -577,6 +595,31 @@ async def _process_order_message(message: discord.Message, brand: str, text: str
 
     brand_name = "شهد بيوتي" if brand == "shahd" else "مارلين"
     summary += f"\nالبراند: {brand_name}{dup_warning}"
+
+    # ── فحص المنتجات غير الموجودة في Odoo قبل عرض أزرار التأكيد ──
+    unmatched_products = []
+    for p in parsed.get("products", []):
+        if p.get('is_gift'):
+            continue  # الهدايا لا تحتاج فحص
+        odoo_product = p.get('_odoo_product') or await asyncio.to_thread(
+            find_product, rpc, p['name'], brand=brand
+        )
+        if odoo_product:
+            p['_odoo_product'] = odoo_product  # حفظ النتيجة لتجنب إعادة البحث
+        else:
+            unmatched_products.append(p['name'])
+
+    if unmatched_products:
+        unmatched_list = '\n'.join([f'  ❌ {name}' for name in unmatched_products])
+        await status_msg.edit(
+            content=(
+                f"⛔ **الطلب موقوف — منتجات غير موجودة في النظام:**\n"
+                f"{unmatched_list}\n\n"
+                f"يرجى تصحيح اسم المنتج وإعادة إرسال الطلب."
+            )
+        )
+        return
+    # ─────────────────────────────────────────────────────────────────
 
     if city_candidates and city_name:
         # Show city selection
