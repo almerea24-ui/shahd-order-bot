@@ -547,18 +547,18 @@ def extract_products_from_catalog(text: str, brand: str, rpc=None) -> list:
 
         # Resolve via brand aliases first
         resolved = raw_name
+        rn = _normalize_ar(raw_name)
         if brand and brand in BRAND_ALIASES:
             bmap = BRAND_ALIASES[brand]
-            rn = _normalize_ar(raw_name)
-            for alias, real in bmap.items():
+            # Sort by alias length descending: longer aliases match first (e.g. 'صابونة الكركم مني' before 'صابونة الكركم')
+            for alias, real in sorted(bmap.items(), key=lambda x: len(x[0]), reverse=True):
                 if _normalize_ar(alias) == rn:
                     resolved = real
                     break
 
-        # Then general aliases
+        # Then general aliases (also sorted by length)
         if resolved == raw_name:
-            rn = _normalize_ar(raw_name)
-            for alias, real in PRODUCT_ALIASES.items():
+            for alias, real in sorted(PRODUCT_ALIASES.items(), key=lambda x: len(x[0]), reverse=True):
                 if _normalize_ar(alias) == rn:
                     resolved = real
                     break
