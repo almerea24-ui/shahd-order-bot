@@ -437,6 +437,8 @@ def _normalize_ar(text: str) -> str:
     t = t.replace('ـ', '')
     for c in 'ًٌٍَُِّْ':
         t = t.replace(c, '')
+    # Normalize mini/مني/ميني → same token
+    t = t.replace('ميني', 'مني').replace('mini', 'مني')
     return t.lower()
 
 
