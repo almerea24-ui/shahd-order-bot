@@ -217,7 +217,7 @@ def find_product(rpc: OdooRPC, product_name: str, brand: str = None):
         brand_specific = shahd_products if brand == 'shahd' else marlin_products if brand == 'marlin' else []
 
     # Helper: search within a product list
-    def search_in(products_list, name, min_score=0.6):
+    def search_in(products_list, name, min_score=0.75):
         # 1. Exact match
         for p in products_list:
             if p['name'].strip() == name:
@@ -236,26 +236,25 @@ def find_product(rpc: OdooRPC, product_name: str, brand: str = None):
                 return scored[0][0]
         return None
 
-    # 1. If brand alias was applied, search in all filtered products (shahd+neutral or marlin+neutral)
-    #    with exact/normalized match first — this ensures neutral products are found correctly
-    if brand_alias_applied:
-        # Try exact match in all filtered products first
-        for p in all_products:
-            if p['name'].strip() == resolved_name:
-                logger.info(f"Brand-alias exact match: '{p['name']}'")
-                return p
-        name_norm_check = normalize_arabic(resolved_name)
-        for p in all_products:
-            if normalize_arabic(p['name']) == name_norm_check:
-                logger.info(f"Brand-alias normalized match: '{p['name']}'")
-                return p
+    # 1. Always try exact/normalized match in all filtered products first
+    #    This prevents brand-specific fuzzy match from overriding a correct neutral/exact product
+    #    e.g. 'صابونة الكركم' (neutral) should win over 'صابونة الكركم مني' (shahd fuzzy 0.87)
+    #    e.g. 'مقشر التشيز كيك' (neutral) should win over 'مقشر النيلة' (shahd fuzzy 0.62)
+    for p in all_products:
+        if p['name'].strip() == resolved_name:
+            logger.info(f"Exact match in filtered: '{p['name']}'")
+            return p
+    name_norm_check = normalize_arabic(resolved_name)
+    for p in all_products:
+        if normalize_arabic(p['name']) == name_norm_check:
+            logger.info(f"Normalized match in filtered: '{p['name']}'")
+            return p
 
     # 2. Search in brand-specific products first (highest priority)
     if brand and brand_specific:
         result = search_in(brand_specific, resolved_name)
         if result:
-            logger.info(f"Brand-specific match: '{result['name']}'"
-)
+            logger.info(f"Brand-specific match: '{result['name']}'")
             return result
 
     # 3. Search in all filtered products
