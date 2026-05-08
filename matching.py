@@ -137,7 +137,7 @@ def resolve_product_name(name: str) -> str:
         if score > best_score:
             best_score = score
             best_match = real_name
-    if best_match and best_score >= 0.6:
+    if best_match and best_score >= 0.80:
         logger.info(f"Alias fuzzy match: '{name_clean}' -> '{best_match}' (score: {best_score:.2f})")
         return best_match
 
@@ -217,7 +217,7 @@ def find_product(rpc: OdooRPC, product_name: str, brand: str = None):
         brand_specific = shahd_products if brand == 'shahd' else marlin_products if brand == 'marlin' else []
 
     # Helper: search within a product list
-    def search_in(products_list, name, min_score=0.75):
+    def search_in(products_list, name, min_score=0.85):
         # 1. Exact match
         for p in products_list:
             if p['name'].strip() == name:
@@ -262,20 +262,28 @@ def find_product(rpc: OdooRPC, product_name: str, brand: str = None):
     if result:
         logger.info(f"Filtered match: '{result['name']}'"
 )
-        return result    # 4. Keyword overlap (for long product names)
+        return result
+
+    # 4. Keyword overlap (for long product names with specific keywords)
+    #    Only search in filtered (brand-specific) products, not all_products
+    #    Threshold raised to 0.65 to avoid false positives like مقشر الزيدة -> مقشر كاندي
     resolved_words = set(normalize_arabic(w) for w in resolved_name.split() if len(w) > 1)
     generic_words = {'بكج', 'كريم', 'عطر', 'زيت', 'سيروم', 'غسول', 'مقشر',
                      'لوشن', 'شامبو', 'ماسك', 'مربي', 'عسل', 'كورس', 'صابونه',
-                     'مرطب', 'هديه', 'للعنايه', 'بالجسم', 'للوجه'}
+                     'مرطب', 'هديه', 'للعنايه', 'بالجسم', 'للوجه', 'الجديد',
+                     'مارلين', 'شهد', 'بيوتي', 'ستور'}
 
     best_kw = None
     best_kw_score = 0
-    for p in all_products:
+    # Search only in brand-filtered products to avoid cross-brand false positives
+    kw_search_pool = all_products  # already brand-filtered above
+    for p in kw_search_pool:
         p_words = set(normalize_arabic(w) for w in p['name'].split() if len(w) > 1)
         common = resolved_words & p_words
         specific_common = common - generic_words
 
-        if len(common) >= 2 and len(specific_common) >= 1:
+        # Require at least 2 specific (non-generic) words in common
+        if len(specific_common) >= 2:
             score = len(common) / len(resolved_words | p_words)
             if specific_common:
                 score += 0.3
@@ -283,7 +291,7 @@ def find_product(rpc: OdooRPC, product_name: str, brand: str = None):
                 best_kw_score = score
                 best_kw = p
 
-    if best_kw and best_kw_score >= 0.4:
+    if best_kw and best_kw_score >= 0.65:
         logger.info(f"Keyword match: '{best_kw['name']}' (score: {best_kw_score:.2f})")
         return best_kw
 
@@ -321,7 +329,7 @@ def find_product(rpc: OdooRPC, product_name: str, brand: str = None):
             if score > best_fb_score:
                 best_fb_score = score
                 best_fallback = p
-        if best_fallback and best_fb_score >= 0.4:
+        if best_fallback and best_fb_score >= 0.80:
             logger.info(f"Odoo fallback match: '{best_fallback['name']}' (score: {best_fb_score:.2f})")
             return best_fallback
 
