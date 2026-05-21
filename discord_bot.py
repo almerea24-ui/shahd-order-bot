@@ -121,46 +121,24 @@ def _distribute_discount(products_total: float, target_total: float, delivery_fe
                          matched_products: list, order_id: int, rpc: OdooRPC,
                          product_line_ids: list) -> float:
     """
-    Distribute the difference between products_total+delivery and target_total
-    proportionally across non-gift product lines.
+    Apply the difference between products_total+delivery and target_total
+    as a single discount/adjustment line.
     Returns the actual final total.
     """
     current_total = products_total + delivery_fee
     if target_total <= 0 or abs(current_total - target_total) <= 1:
         return current_total
 
-    diff = target_total - current_total  # positive = need to add, negative = need to subtract
+    diff = target_total - current_total  # negative = discount, positive = extra charge
 
-    # Get non-gift product lines to distribute on
-    distributable = [(lid, price) for lid, price, is_gift in product_line_ids if not is_gift and price > 0]
-
-    if not distributable:
-        # No distributable products — fall back to single adjustment line
-        rpc.create('sale.order.line', {
-            'order_id': order_id,
-            'product_id': DISCOUNT_PRODUCT_ID,
-            'product_uom_qty': 1,
-            'price_unit': diff,
-            'name': 'Price Adjustment' if diff > 0 else 'Discount',
-        })
-        return target_total
-
-    # Distribute proportionally
-    total_distributable = sum(price for _, price in distributable)
-    remaining_diff = diff
-    for i, (line_id, price) in enumerate(distributable):
-        if i == len(distributable) - 1:
-            # Last line gets the remainder to avoid rounding errors
-            adjustment = remaining_diff
-        else:
-            adjustment = round(diff * (price / total_distributable))
-            remaining_diff -= adjustment
-
-        new_price = price + adjustment
-        if new_price < 0:
-            new_price = 0
-        rpc.write('sale.order.line', line_id, {'price_unit': new_price})
-
+    # Add a single adjustment line using the discount product
+    rpc.create('sale.order.line', {
+        'order_id': order_id,
+        'product_id': DISCOUNT_PRODUCT_ID,
+        'product_uom_qty': 1,
+        'price_unit': diff,
+        'name': 'تعديل السعر' if diff > 0 else 'خصم',
+    })
     return target_total
 
 
