@@ -144,8 +144,23 @@ def resolve_product_name(name: str) -> str:
     return name_clean
 
 
+def _strip_quantity_words(name: str) -> str:
+    """Remove quantity words like 'عدد N' or 'x N' from product name before matching."""
+    import re
+    # Remove 'عدد' followed by optional space and digits
+    name = re.sub(r'\s*عدد\s*\d*', '', name)
+    # Remove 'x' or 'X' followed by digits at end
+    name = re.sub(r'\s*[xX]\s*\d+$', '', name)
+    # Remove trailing digits that look like quantities (e.g. 'صابونة 2')
+    # Only strip if preceded by space to avoid stripping part of product name
+    name = re.sub(r'\s+\d+$', '', name)
+    return name.strip()
+
+
 def find_product(rpc: OdooRPC, product_name: str, brand: str = None):
     """Find product using cached catalog + fuzzy matching."""
+    # Pre-clean: strip quantity words like 'عدد 2' before matching
+    product_name = _strip_quantity_words(product_name)
     # Check brand-specific aliases first (highest priority)
     resolved_name = product_name.strip()
     brand_alias_applied = False
