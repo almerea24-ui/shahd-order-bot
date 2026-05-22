@@ -229,16 +229,18 @@ def create_full_order(order_data, brand):
     # حماية ثانية: تحقق من وجود جميع المنتجات قبل إنشاء أي سطر في Odoo
     missing_products = []
     for item in products_data:
-        if item.get('is_gift'):
+        if item.get('_skip'):
             continue
         if not item.get('_odoo_product'):
             p = find_product(rpc, item["name"], brand=brand)
             if p:
                 item['_odoo_product'] = p
+            elif item.get('is_gift'):
+                item['_skip'] = True  # هدية غير موجودة — تجاهل
             else:
                 missing_products.append(item["name"])
     if missing_products:
-        # حذف الطلب الذي تم إنشاؤه للتو وإلغاؤه
+        # حذف الطلب الذي تم إنشاؤه وإلغاؤه
         try:
             rpc.call('sale.order', 'action_cancel', [[order_id]])
             rpc.unlink('sale.order', order_id)
@@ -251,6 +253,8 @@ def create_full_order(order_data, brand):
     low_stock = []
     product_line_ids = []  # (line_id, price_unit, is_gift) for pro-rata
     for item in products_data:
+        if item.get('_skip'):
+            continue  # هدية غير موجودة — تجاهل
         # Improvement 1: use pre-resolved catalog product if available
         product = item.get('_odoo_product') or find_product(rpc, item["name"], brand=brand)
         if product:
@@ -574,16 +578,18 @@ async def _process_order_message(message: discord.Message, brand: str, text: str
     brand_name = "شهد بيوتي" if brand == "shahd" else "مارلين"
     summary += f"\nالبراند: {brand_name}{dup_warning}"
 
-    # ── فحص المنتجات غير الموجودة في Odoo قبل عرض أزرار التأكيد ──
+    # ── فحص المنتجات في Odoo قبل عرض أزرار التأكيد ──
     unmatched_products = []
     for p in parsed.get("products", []):
-        if p.get('is_gift'):
-            continue  # الهدايا لا تحتاج فحص
         odoo_product = p.get('_odoo_product') or await asyncio.to_thread(
             find_product, rpc, p['name'], brand=brand
         )
         if odoo_product:
             p['_odoo_product'] = odoo_product  # حفظ النتيجة لتجنب إعادة البحث
+        elif p.get('is_gift'):
+            # هدية غير موجودة — تحذف بصمت بدون إيقاف الطلب
+            logger.warning(f"هدية غير موجودة في Odoo: '{p['name']}' — تم تجاهلها")
+            p['_skip'] = True
         else:
             unmatched_products.append(p['name'])
 
