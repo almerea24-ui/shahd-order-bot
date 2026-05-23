@@ -89,7 +89,8 @@ PRODUCT_LINE_KEYWORDS = [
     'زيت', 'شامبو', 'سيروم', 'ماسك', 'تنت', 'صابونة', 'صابونه', 'حمرة', 'حمره', 'رموش',
     'اضافر', 'اظافر', 'اضاضر', 'ليفة', 'ليفه', 'سبلاش', 'قناع', 'مورد', 'واقي',
     'مخمرية', 'شاي', 'مكس', 'بياض', 'نيلة', 'كافيار', 'مسك', 'حنة', 'حنه',
-    'مبيض', 'مبيضة', 'مرطب', 'كريمة', 'بودر', 'مسحوق', 'بخاخ', 'سكراب', 'صبغة'
+    'مبيض', 'مبيضة', 'مرطب', 'كريمة', 'بودر', 'مسحوق', 'بخاخ', 'سكراب', 'صبغة',
+    'مسكارا', 'مسكاره', 'قلم', 'اسنز', 'essence', 'بوند', 'كف', 'ليب', 'بلاشر', 'هايلايتر'
 ]
 
 # Lines that are NOT products (address/phone/price/notes indicators)
@@ -141,10 +142,12 @@ def _extract_product_lines_from_text(text: str) -> list:
         if not _is_product_line(line):
             continue
 
-        is_gift = bool(re.match(r'^(\u0647\u062f\u064a\u0629|\u0647\u062f\u064a\u0647)\s+', line)) or \
-                  bool(re.search(r'\s+(\u0647\u062f\u064a\u0629|\u0647\u062f\u064a\u0647)$', line))
-        name = re.sub(r'^(\u0647\u062f\u064a\u0629|\u0647\u062f\u064a\u0647)\s+', '', line).strip()
-        name = re.sub(r'\s+(\u0647\u062f\u064a\u0629|\u0647\u062f\u064a\u0647)$', '', name).strip()
+        # Detect is_gift: هدية/هديه anywhere in line
+        is_gift = bool(re.search(r'(^|\s)(هدية|هديه)(\s|$)', line))
+        # Remove هدية/هديه from start, end, or middle (before/after quantity)
+        name = re.sub(r'^(هدية|هديه)\s+', '', line).strip()
+        name = re.sub(r'\s+(هدية|هديه)$', '', name).strip()
+        name = re.sub(r'\s+(هدية|هديه)\s+', ' ', name).strip()
 
         quantity = 1
         adad_match = re.search(r'\s*عدد\s*(\d{1,2})$', name)
