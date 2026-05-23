@@ -7,6 +7,8 @@
 
 set -e  # وقف عند أي خطأ
 
+export RAILWAY_TOKEN="8132f053-8361-4718-a873-3b42299a54bb"
+
 MSG="${1:-update}"
 
 echo ""
@@ -31,14 +33,13 @@ git push origin master
 echo ""
 echo "✅ [3/4] تم الرفع على GitHub بنجاح."
 
-# 3. إرشادات Railway (إذا كانت مستخدمة)
+# 3. نشر على Railway
+echo ""
+echo "🚂 [3/4] نشر على Railway..."
+railway up --detach
+
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "✅ [4/4] النشر مكتمل!"
-echo ""
-echo "📌 إذا كنت تستخدم Railway:"
-echo "   → Railway سيكتشف التحديث تلقائياً ويعيد تشغيل البوت خلال دقيقة."
-echo ""
-echo "📌 إذا كنت تشغّل البوت على سيرفر يدوياً:"
-echo "   → شغّل: git pull && python3 discord_bot.py"
+echo "✅ [4/4] النشر مكتمل على Railway!"
+echo "   → البوت سيكون جاهزاً خلال ~2 دقيقة."
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
