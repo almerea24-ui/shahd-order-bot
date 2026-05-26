@@ -678,6 +678,12 @@ EXAMPLES:
 - "بغداد الأعظمية شارع فلان" → province=بغداد, city=الأعظمية, street=شارع فلان
 
 IMPORTANT: The word RIGHT AFTER the province name is the city. NEVER use a sub-neighborhood (حي فرعي) as city if there's a main area before it. NEVER set city to "غير محدد" - always extract it from the address text.
+CRITICAL — Province names INSIDE the address are DIRECTIONS, not the province:
+- Phrases like "مال النجف", "جهة بغداد", "طريق كربلاء", "ناحية البصرة" inside the address = directions/landmarks, NOT the province.
+- The province is ALWAYS the FIRST geographic word in the address.
+- "حله شارع 80 مال النجف قرب مخبز" → province=بابل, city=الحلة, street=شارع 80 مال النجف قرب مخبز (النجف هنا اتجاه وليس محافظة)
+- "كربلاء حي الغدير شارع بغداد" → province=كربلاء, city=حي الغدير, street=شارع بغداد (بغداد هنا اتجاه)
+- "حلة شارع بغداد" → province=بابل, city=الحلة, street=شارع بغداد
 
 OTHER RULES:
 - Prices can be short (e.g., 26, 50, 75) or full (e.g., 26000, 50000, 75000) - return the EXACT number as written
