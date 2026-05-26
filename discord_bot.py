@@ -174,7 +174,18 @@ def create_full_order(order_data, brand):
             customer_vals['x_studio_city'] = city['id']
             city_matched = True
         else:
-            if street:
+            # إذا city تبدأ بـ "حي" أو "شارع" أو "زقاق" (sub-neighborhood)
+            # جرب الكلمة الأولى من street كـ city بدلاً منها
+            sub_prefixes = ('حي ', 'شارع ', 'زقاق ', 'قرب ', 'خلف ')
+            if any(city_name.startswith(p) for p in sub_prefixes) and street:
+                first_street_word = street.split()[0] if street.split() else ''
+                if first_street_word:
+                    alt = find_city(rpc, first_street_word, state_id)
+                    if alt:
+                        customer_vals['x_studio_city'] = alt['id']
+                        city_matched = True
+
+            if not city_matched and street:
                 street_words = street.split()
                 for i in range(len(street_words)):
                     for length in [2, 1]:
@@ -568,10 +579,16 @@ async def _process_order_message(message: discord.Message, brand: str, text: str
     if state_id and city_name:
         city_found = await asyncio.to_thread(find_city, rpc, city_name, state_id)
         if not city_found:
-            # Try to get candidate cities from Odoo for this state
+            # Try to get candidate cities sorted by fuzzy similarity
             try:
+                from matching import arabic_similarity
                 all_cities = await asyncio.to_thread(rpc.get_cities_for_state, state_id)
-                city_candidates = all_cities[:25]
+                scored = sorted(
+                    all_cities,
+                    key=lambda c: arabic_similarity(city_name, c.get('x_name', '')),
+                    reverse=True
+                )
+                city_candidates = scored[:15]
             except Exception:
                 pass
 

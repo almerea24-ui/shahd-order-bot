@@ -645,7 +645,8 @@ Return ONLY valid JSON with these fields:
 CRITICAL RULES FOR IRAQI ADDRESSES:
 - Iraqi addresses follow this pattern: محافظة + منطقة/قضاء + حي + شارع + تفاصيل
 - province is the GOVERNORATE (محافظة): بغداد, البصرة, النجف, كربلاء, نينوى, etc.
-- city is the MOST SPECIFIC neighborhood/district/area (حي/منطقة/قضاء), NOT the province!
+- city is the FIRST/MAIN area name that comes right after the province — NOT the most specific sub-neighborhood!
+- If the address has multiple levels (منطقة + حي + شارع), put the FIRST area in city, the rest in street.
 
 IMPORTANT PROVINCE MAPPINGS:
 - نجف, النجف = المحافظة: النجف
@@ -670,8 +671,13 @@ EXAMPLES:
 - "كربلاء حي الغدير قرب الكفيل" → province=كربلاء, city=حي الغدير, street=قرب الكفيل
 - "اربيل امباير رويال فيلا 230" → province=أربيل, city=امباير, street=رويال فيلا 230
 - "بغداد باب شرجي" → province=بغداد, city=باب شرجي
+- "كربلاء / الحر / حي القادسية قرب الاتحاد" → province=كربلاء, city=الحر, street=حي القادسية قرب الاتحاد
+- "بغداد الدورة السابعة حي الحسن" → province=بغداد, city=الدورة, street=السابعة حي الحسن
+- "ناصرية فلكة السماوة مقابل مطعم" → province=ذي قار, city=فلكة السماوة, street=مقابل مطعم
+- "بغداد المدائن فلكة السلمان منطقة حي جابر" → province=بغداد, city=المدائن, street=فلكة السلمان منطقة حي جابر
+- "بغداد الأعظمية شارع فلان" → province=بغداد, city=الأعظمية, street=شارع فلان
 
-IMPORTANT: The word RIGHT AFTER the province name is usually the city/area. NEVER set city to "غير محدد" - always extract it from the address text.
+IMPORTANT: The word RIGHT AFTER the province name is the city. NEVER use a sub-neighborhood (حي فرعي) as city if there's a main area before it. NEVER set city to "غير محدد" - always extract it from the address text.
 
 OTHER RULES:
 - Prices can be short (e.g., 26, 50, 75) or full (e.g., 26000, 50000, 75000) - return the EXACT number as written

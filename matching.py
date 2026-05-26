@@ -399,7 +399,7 @@ def find_city(rpc: OdooRPC, city_name: str, state_id: int):
             best_score = score
             best = city
 
-    if best and best_score >= 0.6:
+    if best and best_score >= 0.75:
         logger.info(f"City fuzzy match: '{best['x_name']}' (score: {best_score:.2f})")
         return best
 
