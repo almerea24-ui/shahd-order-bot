@@ -378,6 +378,47 @@ def _validate_and_fix(parsed: dict, original_text: str) -> dict:
                 parsed["city"] = street
                 parsed["street"] = ""
 
+    # 2b. Fix city - if LLM put street content into city field
+    # Detect: city contains street keywords = LLM mistake
+    city = parsed.get("city", "")
+    STREET_KEYWORDS = ['شارع', 'زقاق', 'قرب', 'خلف', 'أمام', 'مقابل', 'بجانب', 'طابق', 'بناية', 'مال ال', 'مالال']
+    city_looks_like_street = any(kw in city for kw in STREET_KEYWORDS) or len(city.split()) > 5
+    if city_looks_like_street:
+        # Extract real city from original text: first word after province
+        addr_line = ""
+        for line in original_text.strip().split('\n'):
+            line_s = line.strip()
+            # Find the address line (contains province or starts with city)
+            for prov_key in sorted(PROVINCE_NORMALIZE.keys(), key=len, reverse=True):
+                if prov_key in line_s:
+                    addr_line = line_s
+                    break
+            if addr_line:
+                break
+        if addr_line:
+            # Remove the province name from the start
+            for prov_key in sorted(PROVINCE_NORMALIZE.keys(), key=len, reverse=True):
+                if addr_line.startswith(prov_key):
+                    remainder = addr_line[len(prov_key):].strip().lstrip('/ ').strip()
+                    # Take first 1-2 words as city
+                    words = remainder.split()
+                    if words:
+                        # If first word is حي, take 2 words
+                        if words[0] == 'حي' and len(words) > 1:
+                            real_city = words[0] + ' ' + words[1]
+                        else:
+                            real_city = words[0]
+                        # Move old city content to street if street is empty
+                        old_city = parsed.get('city', '')
+                        old_street = parsed.get('street', '')
+                        parsed['city'] = real_city
+                        if not old_street and old_city:
+                            parsed['street'] = old_city
+                        elif old_city and old_city not in old_street:
+                            parsed['street'] = old_city
+                        logger.info(f"Fixed city from street-content: '{old_city}' -> '{real_city}'")
+                    break
+
     # 3. Check for حي pattern
     hiy_match = re.search(r'حي\s+(\S+)', original_text)
     if hiy_match:
@@ -676,14 +717,16 @@ EXAMPLES:
 - "ناصرية فلكة السماوة مقابل مطعم" → province=ذي قار, city=فلكة السماوة, street=مقابل مطعم
 - "بغداد المدائن فلكة السلمان منطقة حي جابر" → province=بغداد, city=المدائن, street=فلكة السلمان منطقة حي جابر
 - "بغداد الأعظمية شارع فلان" → province=بغداد, city=الأعظمية, street=شارع فلان
+- "حله شارع 80مال النجف قرب مخبز مهند" → province=بابل, city=الحلة, street=شارع 80مال النجف قرب مخبز مهند
+- "حلة شارع بغداد" → province=بابل, city=الحلة, street=شارع بغداد
+- "كربلاء حي الغدير شارع بغداد" → province=كربلاء, city=حي الغدير, street=شارع بغداد
 
 IMPORTANT: The word RIGHT AFTER the province name is the city. NEVER use a sub-neighborhood (حي فرعي) as city if there's a main area before it. NEVER set city to "غير محدد" - always extract it from the address text.
 CRITICAL — Province names INSIDE the address are DIRECTIONS, not the province:
-- Phrases like "مال النجف", "جهة بغداد", "طريق كربلاء", "ناحية البصرة" inside the address = directions/landmarks, NOT the province.
-- The province is ALWAYS the FIRST geographic word in the address.
-- "حله شارع 80 مال النجف قرب مخبز" → province=بابل, city=الحلة, street=شارع 80 مال النجف قرب مخبز (النجف هنا اتجاه وليس محافظة)
-- "كربلاء حي الغدير شارع بغداد" → province=كربلاء, city=حي الغدير, street=شارع بغداد (بغداد هنا اتجاه)
-- "حلة شارع بغداد" → province=بابل, city=الحلة, street=شارع بغداد
+- "مال النجف", "جهة بغداد", "طريق كربلاء", "ناحية البصرة" = directions/landmarks inside address, NOT the province.
+- The province is ALWAYS the FIRST geographic word. city is the SECOND geographic word.
+- NEVER put the street content into city field. city must be a short area name (1-3 words max).
+- If address starts with "حله" or "الحله" or "الحلة" → province=بابل, city=الحلة (always!)
 
 OTHER RULES:
 - Prices can be short (e.g., 26, 50, 75) or full (e.g., 26000, 50000, 75000) - return the EXACT number as written
