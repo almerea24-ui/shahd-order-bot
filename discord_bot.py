@@ -169,7 +169,7 @@ def create_full_order(order_data, brand):
     city_matched = False
 
     if city_name and state_id:
-        city = find_city(rpc, city_name, state_id)
+        city = find_city(rpc, city_name, state_id, province=province)
         if city:
             customer_vals['x_studio_city'] = city['id']
             city_matched = True
@@ -180,7 +180,7 @@ def create_full_order(order_data, brand):
             if any(city_name.startswith(p) for p in sub_prefixes) and street:
                 first_street_word = street.split()[0] if street.split() else ''
                 if first_street_word:
-                    alt = find_city(rpc, first_street_word, state_id)
+                    alt = find_city(rpc, first_street_word, state_id, province=province)
                     if alt:
                         customer_vals['x_studio_city'] = alt['id']
                         city_matched = True
@@ -191,7 +191,7 @@ def create_full_order(order_data, brand):
                     for length in [2, 1]:
                         if i + length <= len(street_words):
                             candidate = ' '.join(street_words[i:i+length])
-                            city_result = find_city(rpc, candidate, state_id)
+                            city_result = find_city(rpc, candidate, state_id, province=province)
                             if city_result:
                                 customer_vals['x_studio_city'] = city_result['id']
                                 city_matched = True
@@ -201,7 +201,7 @@ def create_full_order(order_data, brand):
 
             if not city_matched and street:
                 combined = f"{city_name} {street.split()[0]}"
-                city_result = find_city(rpc, combined, state_id)
+                city_result = find_city(rpc, combined, state_id, province=province)
                 if city_result:
                     customer_vals['x_studio_city'] = city_result['id']
                     city_matched = True
@@ -411,6 +411,15 @@ class CitySelectView(discord.ui.View):
             if cities:
                 self.parsed_data['_city_id'] = city_id
                 self.parsed_data['_city_name'] = cities[0]['x_name']
+                # تعلم تلقائي: حفظ المطابقة للمرة القادمة
+                try:
+                    from city_learner import learn_city_alias
+                    original_city = self.parsed_data.get('city', '')
+                    province = self.parsed_data.get('province', '')
+                    if original_city and province:
+                        learn_city_alias(original_city, cities[0]['x_name'], province)
+                except Exception as le:
+                    logger.warning(f"city_learner save failed: {le}")
 
         await interaction.response.edit_message(content="⏳ جاري إدخال الطلب...", view=None)
         try:
@@ -533,6 +542,16 @@ async def _process_order_message(message: discord.Message, brand: str, text: str
     if is_dup:
         dup_warning = f"\n\n⚠️ **تحذير:** {dup_msg_odoo or dup_msg_mem}"
 
+    # ── التحقق من رقم الهاتف ──
+    phone_warning = ""
+    phone_val = parsed.get('phone', '')
+    import re as _re
+    phone_digits = _re.sub(r'\D', '', str(phone_val))
+    if not phone_val:
+        phone_warning = "⚠️ **رقم الهاتف مفقود!**\n"
+    elif len(phone_digits) != 11 or not phone_digits.startswith('07'):
+        phone_warning = f"⚠️ **رقم الهاتف غير صحيح:** `{phone_val}` (يجب أن يكون 11 رقم ويبدأ بـ 07)\n"
+
     # Format summary
     summary = f"العميل: {parsed.get('customer_name', 'غير محدد')}\n"
     summary += f"الهاتف: {parsed.get('phone', 'غير محدد')}\n"
@@ -565,19 +584,19 @@ async def _process_order_message(message: discord.Message, brand: str, text: str
         summary += f"ملاحظات: {parsed['notes']}\n"
 
     order_key = f"order_{int(time.time() * 1000)}"
-
-    if province_warning or city_warning:
-        summary += province_warning + city_warning
-        summary += "\n\nأرسل الطلب مرة ثانية بالمحافظة والمنطقة الصحيحة."
+    if province_warning or city_warning or phone_warning:
+        summary += phone_warning + province_warning + city_warning
+        summary += "\n\nصحح البيانات المشار إليها وأعد إرسال الطلب."
         await status_msg.edit(content=f"📋 بيانات الطلب:\n\n{summary}")
         return
 
     # Improvement 2: City disambiguation
     state_id = PROVINCE_MAP.get(parsed.get('province', ''), False)
     city_name = parsed.get('city', '')
+    parsed_province = parsed.get('province', '')
     city_candidates = []
     if state_id and city_name:
-        city_found = await asyncio.to_thread(find_city, rpc, city_name, state_id)
+        city_found = await asyncio.to_thread(find_city, rpc, city_name, state_id, parsed_province)
         if not city_found:
             # Try to get candidate cities sorted by fuzzy similarity
             try:

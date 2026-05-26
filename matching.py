@@ -354,10 +354,21 @@ def find_product(rpc: OdooRPC, product_name: str, brand: str = None):
 
 # ============ City Matching ============
 
-def find_city(rpc: OdooRPC, city_name: str, state_id: int):
-    """Find city using cached city list + fuzzy matching."""
+def find_city(rpc: OdooRPC, city_name: str, state_id: int, province: str = ""):
+    """Find city using aliases dict first, then cached city list + fuzzy matching."""
     if not city_name or not state_id:
         return None
+
+    # 0. Alias lookup first (exact, fast, no API)
+    if province:
+        try:
+            from city_aliases import lookup_city_alias
+            alias_result = lookup_city_alias(city_name, province)
+            if alias_result:
+                logger.info(f"City alias: '{city_name}' → '{alias_result}'")
+                city_name = alias_result
+        except Exception as e:
+            logger.warning(f"city_aliases lookup failed: {e}")
 
     # Get cached cities
     all_cities = rpc.get_cities_for_state(state_id)
