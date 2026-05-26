@@ -50,12 +50,31 @@ KNOWN_CITIES = {
 
 
 def _detect_province_from_text(text: str) -> str:
-    """Try to detect province from raw text using known province names."""
-    text_clean = text.strip()
+    """Try to detect province from raw text using known province names.
+    Searches line by line, prioritizing lines that START with a province name.
+    Avoids picking province names that appear in the middle of an address (directions).
+    """
     sorted_names = sorted(PROVINCE_NORMALIZE.keys(), key=len, reverse=True)
-    for name in sorted_names:
-        if name in text_clean:
-            return PROVINCE_NORMALIZE[name]
+    lines = [l.strip() for l in text.strip().split('\n') if l.strip()]
+
+    # Pass 1: find a line that STARTS with a province name (most reliable)
+    for line in lines:
+        # Strip common address prefixes
+        line_clean = re.sub(r'^(عنوان|:العنوان|العنوان)\s*:?\s*', '', line).strip()
+        for name in sorted_names:
+            if line_clean.startswith(name):
+                return PROVINCE_NORMALIZE[name]
+
+    # Pass 2: fallback - find province anywhere in text (but not preceded by مال/جهة/طريق)
+    for line in lines:
+        for name in sorted_names:
+            if name in line:
+                # Check it's not a direction phrase
+                idx = line.find(name)
+                before = line[:idx].rstrip()
+                if before.endswith('مال') or before.endswith('جهة') or before.endswith('طريق') or before.endswith('ناحية'):
+                    continue
+                return PROVINCE_NORMALIZE[name]
     return ""
 
 
@@ -396,28 +415,79 @@ def _validate_and_fix(parsed: dict, original_text: str) -> dict:
             if addr_line:
                 break
         if addr_line:
-            # Remove the province name from the start
-            for prov_key in sorted(PROVINCE_NORMALIZE.keys(), key=len, reverse=True):
-                if addr_line.startswith(prov_key):
-                    remainder = addr_line[len(prov_key):].strip().lstrip('/ ').strip()
+            # Strip non-geographic prefix words like "عنوان", "العنوان"
+            addr_clean = re.sub(r'^(عنوان|:العنوان|العنوان|address|addr)\s*:?\s*', '', addr_line, flags=re.IGNORECASE).strip()
+            # Find province key: prefer keys at START of addr_clean, then fallback to anywhere
+            # Skip province names that appear after direction words (مال/جهة/طريق)
+            found_prov_key = None
+            found_prov_pos = -1
+            DIRECTION_WORDS = ['مال', 'جهة', 'جهه', 'طريق', 'ناحية', 'ناحيه', 'نحو']
+            sorted_keys = sorted(PROVINCE_NORMALIZE.keys(), key=len, reverse=True)
+            # Pass A: find key at position 0 (start of line)
+            for prov_key in sorted_keys:
+                if addr_clean.startswith(prov_key):
+                    found_prov_key = prov_key
+                    found_prov_pos = 0
+                    break
+            # Pass B: find key anywhere but not after direction word
+            if found_prov_key is None:
+                for prov_key in sorted_keys:
+                    pos = addr_clean.find(prov_key)
+                    if pos != -1:
+                        before = addr_clean[:pos].rstrip()
+                        # Check if preceded by direction word (with or without space)
+                        is_direction = any(
+                            before.endswith(dw) or before.endswith(dw + ' ')
+                            for dw in DIRECTION_WORDS
+                        )
+                        if is_direction:
+                            continue
+                        found_prov_key = prov_key
+                        found_prov_pos = pos
+                        break
+            if found_prov_key is not None:
+                # Keys that are city names themselves (not just province aliases)
+                # e.g. "حله" = city of Babylon, "ناصرية" = city of Dhi Qar
+                CITY_IS_PROVINCE_KEY = {
+                    'حله': 'الحلة', 'حلة': 'الحلة', 'الحلة': 'الحلة', 'الحله': 'الحلة',
+                    'ناصرية': 'الناصرية', 'ناصريه': 'الناصرية', 'الناصرية': 'الناصرية', 'الناصريه': 'الناصرية',
+                    'كوت': 'الكوت', 'الكوت': 'الكوت',
+                    'سماوة': 'السماوة', 'سماوه': 'السماوة', 'السماوة': 'السماوة',
+                    'عمارة': 'العمارة', 'عماره': 'العمارة', 'العمارة': 'العمارة',
+                    'رمادي': 'الرمادي', 'الرمادي': 'الرمادي',
+                    'تكريت': 'تكريت',
+                }
+                if found_prov_key in CITY_IS_PROVINCE_KEY:
+                    # The province key IS the city name
+                    real_city = CITY_IS_PROVINCE_KEY[found_prov_key]
+                    remainder = addr_clean[found_prov_pos + len(found_prov_key):].strip().lstrip('/ ').strip()
+                else:
+                    # Take everything after the province name
+                    remainder = addr_clean[found_prov_pos + len(found_prov_key):].strip().lstrip('/ ').strip()
                     # Take first 1-2 words as city
                     words = remainder.split()
-                    if words:
-                        # If first word is حي, take 2 words
-                        if words[0] == 'حي' and len(words) > 1:
-                            real_city = words[0] + ' ' + words[1]
-                        else:
-                            real_city = words[0]
-                        # Move old city content to street if street is empty
-                        old_city = parsed.get('city', '')
-                        old_street = parsed.get('street', '')
-                        parsed['city'] = real_city
-                        if not old_street and old_city:
-                            parsed['street'] = old_city
-                        elif old_city and old_city not in old_street:
-                            parsed['street'] = old_city
-                        logger.info(f"Fixed city from street-content: '{old_city}' -> '{real_city}'")
-                    break
+                    if not words:
+                        pass  # skip, no city found
+                    # If first word is حي, take 2 words
+                    elif words[0] == 'حي' and len(words) > 1:
+                        real_city = words[0] + ' ' + words[1]
+                        remainder = ' '.join(words[2:]) if len(words) > 2 else ''
+                    elif any(kw in words[0] for kw in STREET_KEYWORDS):
+                        # First word is a street keyword — city unknown, use province key as city
+                        real_city = found_prov_key
+                        remainder = addr_clean[found_prov_pos + len(found_prov_key):].strip().lstrip('/ ').strip()
+                    else:
+                        real_city = words[0]
+                        remainder = ' '.join(words[1:]) if len(words) > 1 else ''
+                # Move old city content to street if street is empty
+                old_city = parsed.get('city', '')
+                old_street = parsed.get('street', '')
+                parsed['city'] = real_city
+                if not old_street and old_city:
+                    parsed['street'] = old_city
+                elif old_city and old_city not in old_street:
+                    parsed['street'] = old_city
+                logger.info(f"Fixed city from street-content: '{old_city}' -> '{real_city}'")
 
     # 3. Check for حي pattern
     hiy_match = re.search(r'حي\s+(\S+)', original_text)
