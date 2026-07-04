@@ -245,7 +245,8 @@ class OdooRPC:
     def find_customer_by_phone(self, phone: str):
         """البحث عن عميل بالرقم فقط (بعد حذف الصفر الأول).
         يبحث بالرقم كاملاً (07XXXXXXXX) وبدون الصفر (7XXXXXXXX).
-        يرجع أول نتيجة أو None.
+        يرجع العميل إذا وجد واحد فقط — إذا وجد أكثر من واحد يرجع None
+        (لمنع ربط الطلب بعميل خاطئ).
         """
         if not phone:
             return None
@@ -258,6 +259,11 @@ class OdooRPC:
             'res.partner', domain,
             fields=['id', 'name', 'phone', 'state_id', 'city',
                     'x_studio_city', 'street', 'street2', 'customer_rank'],
-            limit=1
+            limit=2  # نجلب 2 لنعرف إذا كان في تكرار
         )
-        return results[0] if results else None
+        if len(results) == 1:
+            return results[0]
+        # إذا 0 أو أكثر من 1 → لا نربط
+        if len(results) > 1:
+            logger.warning("Multiple customers found for phone=%s (%d) — creating new", phone, len(results))
+        return None
