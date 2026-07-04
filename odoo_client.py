@@ -241,3 +241,23 @@ class OdooRPC:
             ['order_id', '=', order_id]
         ], fields=['product_id', 'product_uom_qty', 'price_unit',
                    'price_subtotal', 'is_delivery', 'name'])
+
+    def find_customer_by_phone(self, phone: str):
+        """البحث عن عميل بالرقم فقط (بعد حذف الصفر الأول).
+        يبحث بالرقم كاملاً (07XXXXXXXX) وبدون الصفر (7XXXXXXXX).
+        يرجع أول نتيجة أو None.
+        """
+        if not phone:
+            return None
+        phone_clean = phone.strip().replace(' ', '').replace('-', '')
+        phone_no_zero = phone_clean.lstrip('0')
+        domain = ['|',
+                  ['phone', '=', phone_clean],
+                  ['phone', '=', phone_no_zero]]
+        results = self.search_read(
+            'res.partner', domain,
+            fields=['id', 'name', 'phone', 'state_id', 'city',
+                    'x_studio_city', 'street', 'street2', 'customer_rank'],
+            limit=1
+        )
+        return results[0] if results else None

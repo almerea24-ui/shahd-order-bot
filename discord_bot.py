@@ -217,7 +217,28 @@ def create_full_order(order_data, brand):
     if nearest:
         customer_vals['street2'] = nearest
 
-    partner_id = rpc.create('res.partner', customer_vals)
+    # البحث عن العميل بالرقم أولاً — إذا موجود نحدّث عنوانه ونستخدمه
+    existing = rpc.find_customer_by_phone(phone)
+    if existing:
+        partner_id = existing['id']
+        logger.info("Found existing customer id=%s name=%s for phone=%s", partner_id, existing.get('name'), phone)
+        # تحديث بيانات العميل بالعنوان الجديد
+        update_vals = {}
+        if state_id:
+            update_vals['state_id'] = state_id
+        if 'x_studio_city' in customer_vals:
+            update_vals['x_studio_city'] = customer_vals['x_studio_city']
+        elif 'city' in customer_vals:
+            update_vals['city'] = customer_vals['city']
+        if street:
+            update_vals['street'] = street
+        if nearest:
+            update_vals['street2'] = nearest
+        if update_vals:
+            rpc.write('res.partner', partner_id, update_vals)
+    else:
+        partner_id = rpc.create('res.partner', customer_vals)
+        logger.info("Created new customer id=%s for phone=%s", partner_id, phone)
 
     # 2. Create sale order
     carrier = CARRIER_MAP.get(brand, CARRIER_MAP["shahd"])
